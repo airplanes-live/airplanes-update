@@ -3,7 +3,7 @@ G=$1
 
 if [[ $G == "" ]]; then echo "Error, invalid Latitude!"; exit 1; fi
 
-sudo sed -i -E '/USER/s/^USER=.*/USER='${G}'/gI' /boot/adsbfi-config.txt
-sudo systemctl restart adsbfi-mlat
+sudo sed -i -E '/USER/s/^USER=.*/USER='${G}'/gI' /boot/airplanes-config.txt
+sudo systemctl restart airplanes-mlat
 
 

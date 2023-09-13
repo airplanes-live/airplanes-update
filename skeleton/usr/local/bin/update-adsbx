@@ -1,3 +1,0 @@
-#!/bin/bash
-
-#bash -c "$(wget -nv -O - https://raw.githubusercontent.com/adsbexchange/adsbx-update/main/update-adsbx.sh)"

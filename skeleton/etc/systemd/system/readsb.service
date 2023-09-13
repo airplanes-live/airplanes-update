@@ -5,11 +5,11 @@ Description=readsb ADS-B receiver
 Documentation=https://github.com/mictronics/readsb
 Wants=network.target
 After=network.target
-After=adsbfi-first-run.service
+After=airplanes-first-run.service
 
 [Service]
-EnvironmentFile=/boot/adsbfi-config.txt
-EnvironmentFile=/boot/adsbfi-env
+EnvironmentFile=/boot/airplanes-config.txt
+EnvironmentFile=/boot/airplanes-env
 SyslogIdentifier=readsb
 User=readsb
 RuntimeDirectory=readsb

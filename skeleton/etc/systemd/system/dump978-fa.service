@@ -5,11 +5,11 @@ Description=dump978 ADS-B UAT receiver
 Documentation=https://flightaware.com/adsb/piaware/
 Wants=network.target
 After=network.target
-After=adsbfi-first-run.service
+After=airplanes-first-run.service
 
 [Service]
-EnvironmentFile=/boot/adsbfi-config.txt
-EnvironmentFile=/boot/adsbfi-978env
+EnvironmentFile=/boot/airplanes-config.txt
+EnvironmentFile=/boot/airplanes-978env
 User=dump978
 ExecStart=/usr/bin/dump978-fa $RECEIVER_OPTIONS $DECODER_OPTIONS $NET_OPTIONS
 SyslogIdentifier=dump978-fa

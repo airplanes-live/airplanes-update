@@ -5,7 +5,7 @@
 	       / \|/ \                                                                 
 	      /// v \\\                                                                
 	     /         \                                                               
-	    /   ADSBfi  \                                                              
+	    / Airplanes \                                                              
 	   /    Buster   \                                                             
 	  /   /|     |\   \                                                            
 	 /   / \     / \   \                                                           
@@ -17,7 +17,7 @@
 
 WiFi:  place wpa_supplicant.conf in /boot
 
-Config: adsbfi-config.txt located in /boot
+Config: airplanes-config.txt located in /boot
 
 ALL CHANGES REQUIRE REBOOT
 

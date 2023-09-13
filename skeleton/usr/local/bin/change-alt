@@ -2,6 +2,6 @@
 G=$1
 if [[ $G == "" ]]; then echo "Error, invalid altitude for antenna!"; exit 1; fi
 
-sudo sed -i -E '/ALTITUDE/s/^ALTITUDE=.*/ALTITUDE='${G}'/gI' /boot/adsbfi-config.txt
+sudo sed -i -E '/ALTITUDE/s/^ALTITUDE=.*/ALTITUDE='${G}'/gI' /boot/airplanes-config.txt
 sudo systemctl restart readsb
 

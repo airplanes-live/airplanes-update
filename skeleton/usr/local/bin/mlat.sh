@@ -3,11 +3,11 @@ if [[ "$MLAT_MARKER" == "no" ]]; then
     PRIVACY="--privacy"
 fi
 
-if grep -qs -e 'LATITUDE' /boot/adsbfi-config.txt &>/dev/null && [[ -f /boot/adsbfi-env ]]; then
-    source /boot/adsbfi-config.txt
-    source /boot/adsbfi-env
+if grep -qs -e 'LATITUDE' /boot/airplanes-config.txt &>/dev/null && [[ -f /boot/airplanes-env ]]; then
+    source /boot/airplanes-config.txt
+    source /boot/airplanes-env
 else
-    source /etc/default/adsbfi
+    source /etc/default/airplanes
 fi
 
 if [[ "$LATITUDE" == 0 ]] || [[ "$LONGITUDE" == 0 ]] || [[ "$USER" == 0 ]] || [[ "$USER" == "disable" ]]; then
@@ -26,7 +26,7 @@ while ! nc -z "$INPUT_IP" "$INPUT_PORT" && command -v nc &>/dev/null; do
     sleep 10
 done
 
-exec /usr/local/share/adsbfi/venv/bin/mlat-client \
+exec /usr/local/share/airlanes/venv/bin/mlat-client \
     --input-type "$INPUT_TYPE" --no-udp \
     --input-connect "$INPUT" \
     --server "$MLATSERVER" \
