@@ -1,0 +1,17 @@
+#!/bin/bash
+
+if [ -f "/boot/airplanes-config.txt" ]; then
+    . /boot/airplanes-config.txt
+    . /boot/airplanes-978env
+
+else
+    echo "NETCAT ERR:  Configuration file does not exist."
+    exit 1
+fi
+
+exec /usr/bin/airplanes-978 \
+    $RECEIVER_978_OPTIONS $DECODER_978_OPTIONS $NET_978_OPTIONS $JSON_978_OPTIONS \
+    --lat ${LATITUDE} --lon ${LONGITUDE} \
+    --net-connector 127.0.0.1,30978,uat_in \
+    --write-json /run/airplanes-978 --quiet
+
