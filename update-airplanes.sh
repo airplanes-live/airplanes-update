@@ -125,7 +125,7 @@ mv "$VENV" "$VENV-backup" -f &>/dev/null || true
 cd $updir
 
 echo 'building mlat-client in virtual-environment .......'
-if git clone --quiet --depth 1 --single-branch https://github.com/airplenes/mlat-client.git \
+if git clone --quiet --depth 1 --single-branch https://github.com/airplanes/mlat-client.git \
     && cd mlat-client \
     && /usr/bin/python3 -m venv $VENV  \
     && source $VENV/bin/activate  \

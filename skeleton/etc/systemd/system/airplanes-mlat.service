@@ -14,7 +14,7 @@ Type=simple
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=64
-SyslogIdentifier=aiplanes-mlat
+SyslogIdentifier=airplanes-mlat
 
 [Install]
 WantedBy=default.target

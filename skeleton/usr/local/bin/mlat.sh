@@ -26,7 +26,7 @@ while ! nc -z "$INPUT_IP" "$INPUT_PORT" && command -v nc &>/dev/null; do
     sleep 10
 done
 
-exec /usr/local/share/airlanes/venv/bin/mlat-client \
+exec /usr/local/share/airplanes/venv/bin/mlat-client \
     --input-type "$INPUT_TYPE" --no-udp \
     --input-connect "$INPUT" \
     --server "$MLATSERVER" \
