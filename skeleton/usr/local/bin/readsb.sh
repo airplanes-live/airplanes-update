@@ -4,6 +4,11 @@ if [[ "$DUMP1090" == "no" ]]; then
     RECEIVER_OPTIONS="--net-only"
 fi
 
+if [[ "$MODEAC" == "yes" ]]; then
+    DECODER_OPTIONS=$DECODER_OPTIONS" --modeac"
+fi
+
+
 exec /usr/bin/readsb \
     --net-api-port 30152 \
     --net-json-port 30154 \

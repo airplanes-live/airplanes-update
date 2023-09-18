@@ -43,7 +43,8 @@ AUTOGAIN=yes
 # Enable 978 UAT? (requires second SDR)
 DUMP978=no
 
-#ZeroTier support removed May 12th until airplanes.live setup a solution if deemed appropriate - RA
+# Enable sending Mode A/C data to airplanes.live
+MODEAC=yes
 
 # Use Custom LED indications?
 CUSTOMLEDS=no
