@@ -9,7 +9,9 @@ if [[ "$MODEAC" == "yes" ]]; then
 fi
 
 if [[ "$AUTOGAIN" == "yes" ]]; then
-    DECODER_OPTIONS=$DECODER_OPTIONS" --gain=auto"
+    $GAIN_OPT=" --gain=auto"
+else
+    $GAIN_OPT=" --gain=$GAIN"
 fi
 
 
@@ -18,7 +20,7 @@ exec /usr/bin/readsb \
     --net-api-port 30152 \
     --net-json-port 30154 \
     --write-prom /run/readsb/stats.prom \
-    --gain $GAIN \
+     $GAIN_OPT \
     --lat $LATITUDE \
     --lon $LONGITUDE \
     $RECEIVER_OPTIONS \
