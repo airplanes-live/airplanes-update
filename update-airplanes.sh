@@ -33,7 +33,7 @@ function aptInstall() {
 packages="git make gcc libusb-1.0-0 libusb-1.0-0-dev librtlsdr0 librtlsdr-dev ncurses-bin ncurses-dev zlib1g zlib1g-dev python3-dev python3-venv libzstd-dev libzstd1"
 aptInstall $packages
 
-git clone --quiet --depth 1 https://github.com/airplanes-live/airplanes-update.git
+git clone --quiet --depth 1 -b bookworm https://github.com/airplanes-live/airplanes-update.git
 cd airplanes-update
 
 find skeleton -type d | cut -d / -f1 --complement | grep -v '^skeleton' | xargs -t -I '{}' -s 2048 mkdir -p /'{}' &>/dev/null
