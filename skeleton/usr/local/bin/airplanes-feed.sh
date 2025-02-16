@@ -8,6 +8,7 @@ do
         sendAC="--modeac"
     fi
     /usr/bin/airplanes-feeder --quiet --net --net-only \
+        --uuid-file=/boot/airplanes-uuid \
         --db-file=none --max-range 450 \
         --net-beast-reduce-interval 0.5 \
         --net-connector feed.airplanes.live,30004,beast_reduce_plus_out,feed2.airplanes.live,64004 \
