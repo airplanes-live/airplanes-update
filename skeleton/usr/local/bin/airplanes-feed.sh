@@ -7,6 +7,13 @@ do
     if [ "$MODEAC" = "yes" ]; then
         sendAC="--modeac"
     fi
+
+    if [ -f /boot/airplanes-uuid ]; then
+        UUID_FILE="/boot/airplanes-uuid"
+    else
+        UUID_FILE="/usr/local/share/airplanes/airplanes-uuid"
+    fi
+    
     /usr/bin/airplanes-feeder --quiet --net --net-only \
         --uuid-file=/boot/airplanes-uuid \
         --db-file=none --max-range 450 \
