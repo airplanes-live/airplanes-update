@@ -61,7 +61,8 @@ systemctl enable \
     pingfail.service
 
 # mask services we don't need on this image
-MASK="dump1090-fa dump1090 dump1090-mutability dump978-rb dump1090-rb"
+# disable autogain script and timer readsb gain=auto current
+MASK="dump1090-fa dump1090 dump1090-mutability dump978-rb dump1090-rb autogain1090.service autogain1090.timer"
 for service in $MASK; do
     systemctl disable $service || true
     systemctl stop $service || true
