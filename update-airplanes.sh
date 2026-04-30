@@ -20,11 +20,16 @@ airplanes_path() {
 }
 
 if [[ "$(id -u)" != "0" ]]; then
-    exec sudo -E bash "${BASH_SOURCE[0]}"
+    exec sudo -E bash -- "${BASH_SOURCE[0]}"
 fi
 
 # let's do all of this in a clean directory:
 updir="$(airplanes_path /tmp/update-airplanes)"
+
+cleanup() {
+    rm -rf "$updir"
+}
+trap cleanup EXIT
 
 rm -rf "$updir"
 mkdir -p "$updir"
@@ -136,24 +141,25 @@ chown readsb "$(airplanes_path /var/globe_history)"
 
 echo 'restarting services .......'
 restartIfEnabled readsb
+restartIfEnabled airplanes-feed
 restartIfEnabled airplanes-978
 
 cd "$updir"
 rm -rf "$updir/readsb"
 
-echo 'updating airplanes.live feed components .......'
-cd "$updir"
-git clone --quiet --depth 1 --single-branch --branch "$FEED_BRANCH" "$FEED_REPO" feed
-AIRPLANES_ROOT="$AIRPLANES_ROOT" \
-AIRPLANES_FEED_REPO="$FEED_REPO" \
-AIRPLANES_FEED_BRANCH="$FEED_BRANCH" \
-AIRPLANES_PACKAGE_MANAGER=apt \
-    bash "$updir/feed/update.sh"
+if ischroot; then
+    echo 'skipping airplanes.live feed update in chroot'
+else
+    echo 'updating airplanes.live feed components .......'
+    git clone --quiet --depth 1 --single-branch --branch "$FEED_BRANCH" "$FEED_REPO" feed
+    AIRPLANES_ROOT="$AIRPLANES_ROOT" \
+    AIRPLANES_FEED_REPO="$FEED_REPO" \
+    AIRPLANES_FEED_BRANCH="$FEED_BRANCH" \
+    AIRPLANES_PACKAGE_MANAGER="${AIRPLANES_PACKAGE_MANAGER:-apt}" \
+        bash "$updir/feed/update.sh"
 
-cd "$updir"
-rm -f -R "$updir/feed"
-
-cd "$updir"
+    rm -f -R "$updir/feed"
+fi
 
 echo 'update tar1090 ...........'
 bash -c "$(wget -nv -O - https://raw.githubusercontent.com/airplanes-live/tar1090/master/install.sh)"
@@ -182,7 +188,3 @@ echo '--------------------------------------------'
 echo '             UPDATE COMPLETE'
 echo '--------------------------------------------'
 echo '--------------------------------------------'
-
-
-cd "$(airplanes_path /tmp)"
-rm -rf "$updir"

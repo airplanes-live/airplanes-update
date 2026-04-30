@@ -15,17 +15,19 @@ fi
 UPDATE_BRANCH="rootfs-smoke"
 READSB_BRANCH="rootfs-smoke"
 FEED_BRANCH="rootfs-smoke"
-UPDATE_SOURCE="$WORK_DIR/airplanes-update-source"
-UPDATE_BARE="$WORK_DIR/airplanes-update.git"
-READSB_SOURCE="$WORK_DIR/readsb-source"
-READSB_BARE="$WORK_DIR/readsb.git"
-FEED_SOURCE="$WORK_DIR/feed-source"
-FEED_BARE="$WORK_DIR/feed.git"
-ROOT_DIR="$WORK_DIR/rootfs"
-STUB_DIR="$WORK_DIR/bin"
-COMMAND_LOG="$WORK_DIR/commands.log"
-FEED_UPDATE_LOG="$WORK_DIR/feed-update.log"
-TAR1090_LOG="$WORK_DIR/tar1090.log"
+
+CASE_DIR=""
+UPDATE_SOURCE=""
+UPDATE_BARE=""
+READSB_SOURCE=""
+READSB_BARE=""
+FEED_SOURCE=""
+FEED_BARE=""
+ROOT_DIR=""
+STUB_DIR=""
+COMMAND_LOG=""
+FEED_UPDATE_LOG=""
+TAR1090_LOG=""
 
 cleanup() {
     if [[ "$KEEP_WORK_DIR" != "1" ]]; then
@@ -47,6 +49,25 @@ fail() {
         cat "$FEED_UPDATE_LOG" >&2
     fi
     exit 1
+}
+
+setup_case() {
+    local name="$1"
+
+    CASE_DIR="$WORK_DIR/$name"
+    UPDATE_SOURCE="$CASE_DIR/airplanes-update-source"
+    UPDATE_BARE="$CASE_DIR/airplanes-update.git"
+    READSB_SOURCE="$CASE_DIR/readsb-source"
+    READSB_BARE="$CASE_DIR/readsb.git"
+    FEED_SOURCE="$CASE_DIR/feed-source"
+    FEED_BARE="$CASE_DIR/feed.git"
+    ROOT_DIR="$CASE_DIR/rootfs"
+    STUB_DIR="$CASE_DIR/bin"
+    COMMAND_LOG="$CASE_DIR/commands.log"
+    FEED_UPDATE_LOG="$CASE_DIR/feed-update.log"
+    TAR1090_LOG="$CASE_DIR/tar1090.log"
+
+    mkdir -p "$CASE_DIR"
 }
 
 make_repo() {
@@ -82,6 +103,8 @@ MAKE
 }
 
 make_feed_repo() {
+    local mode="${1:-success}"
+
     mkdir -p "$FEED_SOURCE"
     cat > "$FEED_SOURCE/update.sh" <<'SH'
 #!/usr/bin/env bash
@@ -95,7 +118,13 @@ set -euo pipefail
     printf 'repo=%s\n' "${AIRPLANES_FEED_REPO:-}"
     printf 'branch=%s\n' "${AIRPLANES_FEED_BRANCH:-}"
     printf 'package_manager=%s\n' "${AIRPLANES_PACKAGE_MANAGER:-}"
+    printf 'mode=%s\n' "${AIRPLANES_TEST_FEED_UPDATE_MODE:-success}"
 } >> "$FEED_UPDATE_LOG"
+
+if [[ "${AIRPLANES_TEST_FEED_UPDATE_MODE:-success}" == "fail" ]]; then
+    printf 'intentional feed/update.sh failure\n' >&2
+    exit 1
+fi
 
 mkdir -p "$AIRPLANES_ROOT/boot" "$AIRPLANES_ROOT/usr/local/share/airplanes"
 printf '%s\n' '11111111-2222-3333-4444-555555555555' > "$AIRPLANES_ROOT/boot/airplanes-uuid"
@@ -103,6 +132,10 @@ printf '%s\n' 'feed update ran' > "$AIRPLANES_ROOT/usr/local/share/airplanes/fee
 SH
     chmod +x "$FEED_SOURCE/update.sh"
     make_repo "$FEED_SOURCE" "$FEED_BRANCH" "$FEED_BARE"
+
+    if [[ "$mode" == "fail" ]]; then
+        return 0
+    fi
 }
 
 prepare_rootfs() {
@@ -159,6 +192,9 @@ exit 0
 SH
     cat > "$STUB_DIR/ischroot" <<'SH'
 #!/usr/bin/env bash
+if [[ "${AIRPLANES_TEST_IS_CHROOT:-0}" == "1" ]]; then
+    exit 0
+fi
 exit 1
 SH
     cat > "$STUB_DIR/wget" <<'SH'
@@ -170,22 +206,14 @@ SH
     chmod +x "$STUB_DIR"/*
 }
 
-assert_contains() {
-    local file="$1"
-    local pattern="$2"
-    grep -q -- "$pattern" "$file" || fail "$file does not contain $pattern"
-}
+run_update() {
+    local feed_repo="${1:-file://$FEED_BARE}"
+    local feed_mode="${2:-success}"
+    local package_manager="${3:-}"
+    local is_chroot="${4:-0}"
+    local status
 
-main() {
-    [[ -d "$UPDATE_DIR" ]] || fail "update dir not found: $UPDATE_DIR"
-    mkdir -p "$WORK_DIR"
-
-    make_update_repo
-    make_readsb_repo
-    make_feed_repo
-    prepare_rootfs
-    write_stubs
-
+    set +e
     PATH="$STUB_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     COMMAND_LOG="$COMMAND_LOG" \
     FEED_UPDATE_LOG="$FEED_UPDATE_LOG" \
@@ -195,9 +223,44 @@ main() {
     AIRPLANES_UPDATE_BRANCH="$UPDATE_BRANCH" \
     AIRPLANES_READSB_REPO="file://$READSB_BARE" \
     AIRPLANES_READSB_BRANCH="$READSB_BRANCH" \
-    AIRPLANES_FEED_REPO="file://$FEED_BARE" \
+    AIRPLANES_FEED_REPO="$feed_repo" \
     AIRPLANES_FEED_BRANCH="$FEED_BRANCH" \
+    AIRPLANES_TEST_FEED_UPDATE_MODE="$feed_mode" \
+    AIRPLANES_TEST_IS_CHROOT="$is_chroot" \
+    AIRPLANES_PACKAGE_MANAGER="$package_manager" \
         bash "$UPDATE_DIR/update-airplanes.sh"
+    status=$?
+    set -e
+
+    return "$status"
+}
+
+prepare_common_fixture() {
+    local feed_mode="${1:-success}"
+
+    make_update_repo
+    make_readsb_repo
+    make_feed_repo "$feed_mode"
+    prepare_rootfs
+    write_stubs
+}
+
+assert_contains() {
+    local file="$1"
+    local pattern="$2"
+    grep -q -- "$pattern" "$file" || fail "$file does not contain $pattern"
+}
+
+assert_not_contains() {
+    local file="$1"
+    local pattern="$2"
+    if [[ -f "$file" ]] && grep -q -- "$pattern" "$file"; then
+        fail "$file unexpectedly contains $pattern"
+    fi
+}
+
+assert_success_state() {
+    local expected_package_manager="$1"
 
     [[ -f "$ROOT_DIR/etc/systemd/system/airplanes-first-run.service" ]] || fail "missing first-run service"
     [[ -f "$ROOT_DIR/usr/local/bin/create-uuid.sh" ]] || fail "missing create-uuid.sh"
@@ -223,18 +286,90 @@ main() {
     assert_contains "$FEED_UPDATE_LOG" "root=$ROOT_DIR"
     assert_contains "$FEED_UPDATE_LOG" "repo=file://$FEED_BARE"
     assert_contains "$FEED_UPDATE_LOG" "branch=$FEED_BRANCH"
-    assert_contains "$FEED_UPDATE_LOG" '^package_manager=apt$'
+    assert_contains "$FEED_UPDATE_LOG" "^package_manager=$expected_package_manager$"
+    assert_contains "$FEED_UPDATE_LOG" '^mode=success$'
     assert_contains "$TAR1090_LOG" '^tar1090 install$'
     assert_contains "$COMMAND_LOG" '^apt-get install '
     assert_contains "$COMMAND_LOG" '^systemctl daemon-reload$'
     assert_contains "$COMMAND_LOG" '^systemctl enable airplanes-first-run.service readsb.service airplanes-mlat.service airplanes-feed.service pingfail.service$'
     assert_contains "$COMMAND_LOG" '^systemctl mask autogain1090.timer$'
     assert_contains "$COMMAND_LOG" '^systemctl restart readsb$'
+    assert_contains "$COMMAND_LOG" '^systemctl restart airplanes-feed$'
     assert_contains "$COMMAND_LOG" '^systemctl restart airplanes-978$'
     assert_contains "$COMMAND_LOG" '^adduser --system --home '
     assert_contains "$COMMAND_LOG" '^adduser readsb plugdev$'
     assert_contains "$COMMAND_LOG" '^adduser readsb dialout$'
     assert_contains "$COMMAND_LOG" '^chown readsb '
+}
+
+test_success_path() {
+    setup_case success
+    prepare_common_fixture success
+    run_update || fail "success path failed"
+    assert_success_state apt
+    echo "success path passed"
+}
+
+test_package_manager_override() {
+    setup_case package-manager-none
+    prepare_common_fixture success
+    run_update "file://$FEED_BARE" success none || fail "package-manager override path failed"
+    assert_success_state none
+    echo "package-manager override path passed"
+}
+
+test_bad_feed_repo_fails_before_tar1090() {
+    setup_case bad-feed-repo
+    prepare_common_fixture success
+    if run_update "file://$CASE_DIR/missing-feed.git"; then
+        fail "bad feed repo unexpectedly succeeded"
+    fi
+
+    [[ ! -e "$TAR1090_LOG" ]] || fail "tar1090 ran after feed repo clone failure"
+    [[ ! -e "$ROOT_DIR/tmp/update-airplanes" ]] || fail "temporary updater directory was not cleaned after feed repo clone failure"
+    assert_not_contains "$COMMAND_LOG" '^systemctl restart airplanes-mlat$'
+    echo "bad feed repo failure path passed"
+}
+
+test_feed_update_failure_propagates() {
+    setup_case feed-update-fails
+    prepare_common_fixture fail
+    if run_update "file://$FEED_BARE" fail; then
+        fail "failing feed/update.sh unexpectedly succeeded"
+    fi
+
+    assert_contains "$FEED_UPDATE_LOG" '^mode=fail$'
+    [[ ! -e "$TAR1090_LOG" ]] || fail "tar1090 ran after feed/update.sh failure"
+    [[ ! -f "$ROOT_DIR/usr/local/share/airplanes/feed-update-marker" ]] || fail "feed update marker exists after failing feed/update.sh"
+    [[ ! -e "$ROOT_DIR/tmp/update-airplanes" ]] || fail "temporary updater directory was not cleaned after feed/update.sh failure"
+    echo "feed/update.sh failure path passed"
+}
+
+test_chroot_skips_feed_update() {
+    setup_case chroot
+    prepare_common_fixture success
+    run_update "file://$CASE_DIR/missing-feed.git" success "" 1 || fail "chroot path failed"
+
+    [[ ! -e "$FEED_UPDATE_LOG" ]] || fail "feed/update.sh ran in chroot"
+    [[ ! -f "$ROOT_DIR/usr/local/share/airplanes/feed-update-marker" ]] || fail "feed update marker exists in chroot"
+    [[ ! -f "$ROOT_DIR/boot/airplanes-version-decoder" ]] || fail "decoder version was written in chroot"
+    [[ ! -e "$ROOT_DIR/tmp/update-airplanes" ]] || fail "temporary updater directory was not cleaned after chroot exit"
+    assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^LATITUDE=0.00000$'
+    assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^GRAPHS1090=yes$'
+    assert_contains "$TAR1090_LOG" '^tar1090 install$'
+    assert_contains "$COMMAND_LOG" '^systemctl restart airplanes-feed$'
+    echo "chroot skip path passed"
+}
+
+main() {
+    [[ -d "$UPDATE_DIR" ]] || fail "update dir not found: $UPDATE_DIR"
+    mkdir -p "$WORK_DIR"
+
+    test_success_path
+    test_package_manager_override
+    test_bad_feed_repo_fails_before_tar1090
+    test_feed_update_failure_propagates
+    test_chroot_skips_feed_update
 
     echo "update-airplanes rootfs smoke passed"
 }

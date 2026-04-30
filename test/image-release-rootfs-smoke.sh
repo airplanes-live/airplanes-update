@@ -373,6 +373,7 @@ assert_updated_image() {
     assert_contains "$COMMAND_LOG" '^systemctl enable airplanes-first-run.service readsb.service airplanes-mlat.service airplanes-feed.service pingfail.service$'
     assert_contains "$COMMAND_LOG" '^systemctl mask autogain1090.timer$'
     assert_contains "$COMMAND_LOG" '^systemctl restart readsb$'
+    assert_contains "$COMMAND_LOG" '^systemctl restart airplanes-feed$'
     assert_contains "$COMMAND_LOG" '^systemctl restart airplanes-978$'
 }
 
