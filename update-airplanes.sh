@@ -152,6 +152,7 @@ if ischroot; then
 else
     echo 'updating airplanes.live feed components .......'
     git clone --quiet --depth 1 --single-branch --branch "$FEED_BRANCH" "$FEED_REPO" feed
+    # Other exported AIRPLANES_* overrides, such as MLAT/readsb repos, are inherited by bash.
     AIRPLANES_ROOT="$AIRPLANES_ROOT" \
     AIRPLANES_FEED_REPO="$FEED_REPO" \
     AIRPLANES_FEED_BRANCH="$FEED_BRANCH" \

@@ -103,8 +103,6 @@ MAKE
 }
 
 make_feed_repo() {
-    local mode="${1:-success}"
-
     mkdir -p "$FEED_SOURCE"
     cat > "$FEED_SOURCE/update.sh" <<'SH'
 #!/usr/bin/env bash
@@ -132,10 +130,6 @@ printf '%s\n' 'feed update ran' > "$AIRPLANES_ROOT/usr/local/share/airplanes/fee
 SH
     chmod +x "$FEED_SOURCE/update.sh"
     make_repo "$FEED_SOURCE" "$FEED_BRANCH" "$FEED_BARE"
-
-    if [[ "$mode" == "fail" ]]; then
-        return 0
-    fi
 }
 
 prepare_rootfs() {
@@ -236,11 +230,9 @@ run_update() {
 }
 
 prepare_common_fixture() {
-    local feed_mode="${1:-success}"
-
     make_update_repo
     make_readsb_repo
-    make_feed_repo "$feed_mode"
+    make_feed_repo
     prepare_rootfs
     write_stubs
 }
@@ -256,6 +248,22 @@ assert_not_contains() {
     local pattern="$2"
     if [[ -f "$file" ]] && grep -q -- "$pattern" "$file"; then
         fail "$file unexpectedly contains $pattern"
+    fi
+}
+
+assert_initial_restart_order() {
+    local actual="$CASE_DIR/restarts.actual"
+    local expected="$CASE_DIR/restarts.expected"
+
+    grep '^systemctl restart ' "$COMMAND_LOG" | head -n 3 > "$actual"
+    cat > "$expected" <<'EOF'
+systemctl restart readsb
+systemctl restart airplanes-feed
+systemctl restart airplanes-978
+EOF
+
+    if ! diff -u "$expected" "$actual"; then
+        fail "unexpected initial systemctl restart order"
     fi
 }
 
@@ -293,9 +301,7 @@ assert_success_state() {
     assert_contains "$COMMAND_LOG" '^systemctl daemon-reload$'
     assert_contains "$COMMAND_LOG" '^systemctl enable airplanes-first-run.service readsb.service airplanes-mlat.service airplanes-feed.service pingfail.service$'
     assert_contains "$COMMAND_LOG" '^systemctl mask autogain1090.timer$'
-    assert_contains "$COMMAND_LOG" '^systemctl restart readsb$'
-    assert_contains "$COMMAND_LOG" '^systemctl restart airplanes-feed$'
-    assert_contains "$COMMAND_LOG" '^systemctl restart airplanes-978$'
+    assert_initial_restart_order
     assert_contains "$COMMAND_LOG" '^adduser --system --home '
     assert_contains "$COMMAND_LOG" '^adduser readsb plugdev$'
     assert_contains "$COMMAND_LOG" '^adduser readsb dialout$'
@@ -304,7 +310,7 @@ assert_success_state() {
 
 test_success_path() {
     setup_case success
-    prepare_common_fixture success
+    prepare_common_fixture
     run_update || fail "success path failed"
     assert_success_state apt
     echo "success path passed"
@@ -312,7 +318,7 @@ test_success_path() {
 
 test_package_manager_override() {
     setup_case package-manager-none
-    prepare_common_fixture success
+    prepare_common_fixture
     run_update "file://$FEED_BARE" success none || fail "package-manager override path failed"
     assert_success_state none
     echo "package-manager override path passed"
@@ -320,7 +326,7 @@ test_package_manager_override() {
 
 test_bad_feed_repo_fails_before_tar1090() {
     setup_case bad-feed-repo
-    prepare_common_fixture success
+    prepare_common_fixture
     if run_update "file://$CASE_DIR/missing-feed.git"; then
         fail "bad feed repo unexpectedly succeeded"
     fi
@@ -333,7 +339,7 @@ test_bad_feed_repo_fails_before_tar1090() {
 
 test_feed_update_failure_propagates() {
     setup_case feed-update-fails
-    prepare_common_fixture fail
+    prepare_common_fixture
     if run_update "file://$FEED_BARE" fail; then
         fail "failing feed/update.sh unexpectedly succeeded"
     fi
@@ -347,7 +353,7 @@ test_feed_update_failure_propagates() {
 
 test_chroot_skips_feed_update() {
     setup_case chroot
-    prepare_common_fixture success
+    prepare_common_fixture
     run_update "file://$CASE_DIR/missing-feed.git" success "" 1 || fail "chroot path failed"
 
     [[ ! -e "$FEED_UPDATE_LOG" ]] || fail "feed/update.sh ran in chroot"
@@ -357,7 +363,7 @@ test_chroot_skips_feed_update() {
     assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^LATITUDE=0.00000$'
     assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^GRAPHS1090=yes$'
     assert_contains "$TAR1090_LOG" '^tar1090 install$'
-    assert_contains "$COMMAND_LOG" '^systemctl restart airplanes-feed$'
+    assert_initial_restart_order
     echo "chroot skip path passed"
 }
 
