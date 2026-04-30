@@ -1,3 +1,14 @@
 #!/bin/bash
 
-bash -c "$(wget -nv -O - https://raw.githubusercontent.com/airplanes-live/airplanes-webconfig/master/update-webconfig.sh)"
+webconfig_branch="${AIRPLANES_WEBCONFIG_BRANCH:-}"
+if [[ -z "$webconfig_branch" && -f /airplanes/webconfig/channel.env ]]; then
+    # shellcheck source=/dev/null
+    source /airplanes/webconfig/channel.env
+    if [[ "${AIRPLANES_WEBCONFIG_CHANNEL_DEFAULT:-}" == "dev" ]]; then
+        webconfig_branch="dev"
+    fi
+fi
+webconfig_branch="${webconfig_branch:-master}"
+
+AIRPLANES_WEBCONFIG_BRANCH="$webconfig_branch" \
+    bash -c "$(wget -nv -O - "https://raw.githubusercontent.com/airplanes-live/airplanes-webconfig/$webconfig_branch/update-webconfig.sh")"
