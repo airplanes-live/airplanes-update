@@ -3,7 +3,7 @@ set -e
 trap 'echo "[ERROR] Error in line $LINENO when executing: $BASH_COMMAND"' ERR
 
 if [[ "$(id -u)" != "0" ]]; then
-    exec sudo bash "$BASH_SOURCE"
+    exec sudo bash "${BASH_SOURCE[0]}"
 fi
 
 # let's do all of this in a clean directory:
@@ -24,14 +24,17 @@ restartIfEnabled() {
 }
 
 function aptInstall() {
-    if ! apt install -y --no-install-recommends --no-install-suggests "$@"; then
-        apt update
-        apt install -y --no-install-recommends --no-install-suggests "$@"
+    if ! apt-get install -y --no-install-recommends --no-install-suggests "$@"; then
+        apt-get update || true
+        apt-get install -y --no-install-recommends --no-install-suggests "$@"
     fi
 }
 
-packages="git make gcc libusb-1.0-0 libusb-1.0-0-dev librtlsdr0 librtlsdr-dev ncurses-bin ncurses-dev zlib1g zlib1g-dev python3-dev python3-venv libzstd-dev libzstd1"
+packages="git wget make gcc libusb-1.0-0 libusb-1.0-0-dev librtlsdr0 librtlsdr-dev ncurses-bin ncurses-dev zlib1g zlib1g-dev python3-dev python3-venv libzstd-dev libzstd1"
 aptInstall $packages
+
+FEED_REPO="${AIRPLANES_FEED_REPO:-https://github.com/airplanes-live/feed.git}"
+FEED_BRANCH="${AIRPLANES_FEED_BRANCH:-main}"
 
 git clone --quiet --depth 1 https://github.com/airplanes-live/airplanes-update.git
 cd airplanes-update
@@ -107,49 +110,21 @@ chown readsb /var/globe_history
 
 echo 'restarting services .......'
 restartIfEnabled readsb
-restartIfEnabled airplanes-feed
 restartIfEnabled airplanes-978
 
 cd $updir
 rm -rf $updir/readsb
 
-
-
-VENV=/usr/local/share/airplanes/venv/
-if [[ -f /usr/local/share/airplanes/venv/bin/python3.7 ]] && command -v python3.9 &>/dev/null;
-then
-    rm -rf "$VENV"
-fi
-rm "$VENV-backup" -rf
-mv "$VENV" "$VENV-backup" -f &>/dev/null || true
+echo 'updating airplanes.live feed components .......'
+cd $updir
+git clone --quiet --depth 1 --single-branch --branch "$FEED_BRANCH" "$FEED_REPO" feed
+AIRPLANES_FEED_REPO="$FEED_REPO" \
+AIRPLANES_FEED_BRANCH="$FEED_BRANCH" \
+AIRPLANES_PACKAGE_MANAGER=apt \
+    bash "$updir/feed/update.sh"
 
 cd $updir
-
-echo 'building mlat-client in virtual-environment .......'
-if git clone --quiet --depth 1 --single-branch https://github.com/airplanes-live/mlat-client.git \
-    && cd mlat-client \
-    && /usr/bin/python3 -m venv $VENV  \
-    && source $VENV/bin/activate  \
-    && python3 setup.py build \
-    && python3 setup.py install \
-    && git rev-parse HEAD > $IPATH/mlat_version || rm -f $IPATH/mlat_version \
-; then
-    rm "$VENV-backup" -rf
-else
-    rm "$VENV" -rf
-    mv "$VENV-backup" "$VENV" &>/dev/null || true
-    echo "--------------------"
-    echo "Installing mlat-client failed, if there was an old version it has been restored."
-    echo "Will continue installation to try and get at least the feed client working."
-    echo "Please report this error to the airplanes discord."
-    echo "--------------------"
-fi
-
-echo 'starting services .......'
-restartIfEnabled airplanes-mlat
-
-cd $updir
-rm -f -R $updir/mlat-client
+rm -f -R $updir/feed
 
 cd $updir
 
