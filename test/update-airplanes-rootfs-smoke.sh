@@ -54,6 +54,9 @@ fail() {
 setup_case() {
     local name="$1"
 
+    UPDATE_BRANCH="rootfs-smoke"
+    READSB_BRANCH="rootfs-smoke"
+    FEED_BRANCH="rootfs-smoke"
     CASE_DIR="$WORK_DIR/$name"
     UPDATE_SOURCE="$CASE_DIR/airplanes-update-source"
     UPDATE_BARE="$CASE_DIR/airplanes-update.git"
@@ -88,6 +91,27 @@ make_update_repo() {
     cp -a "$UPDATE_DIR/." "$UPDATE_SOURCE/"
     rm -rf "$UPDATE_SOURCE/.git"
     make_repo "$UPDATE_SOURCE" "$UPDATE_BRANCH" "$UPDATE_BARE"
+}
+
+make_installed_update_checkout() {
+    local target="$1"
+    local branch="$2"
+
+    mkdir -p "$target"
+    cp -a "$UPDATE_DIR/." "$target/"
+    rm -rf "$target/.git"
+    git -C "$target" init -q -b "$branch"
+    git -C "$target" config user.email "rootfs-smoke@example.invalid"
+    git -C "$target" config user.name "Rootfs Smoke"
+    git -C "$target" add .
+    git -C "$target" commit -q -m "installed updater fixture"
+}
+
+make_raw_update_script() {
+    local target="$1"
+
+    mkdir -p "$target"
+    cp "$UPDATE_DIR/update-airplanes.sh" "$target/update-airplanes.sh"
 }
 
 make_readsb_repo() {
@@ -205,24 +229,34 @@ run_update() {
     local feed_mode="${2:-success}"
     local package_manager="${3:-}"
     local is_chroot="${4:-0}"
+    local pass_branch_env="${5:-1}"
+    local script_path="${6:-$UPDATE_DIR/update-airplanes.sh}"
+    local -a env_args
     local status
 
+    env_args=(
+        "PATH=$STUB_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        "COMMAND_LOG=$COMMAND_LOG"
+        "FEED_UPDATE_LOG=$FEED_UPDATE_LOG"
+        "TAR1090_LOG=$TAR1090_LOG"
+        "AIRPLANES_ROOT=$ROOT_DIR"
+        "AIRPLANES_UPDATE_REPO=file://$UPDATE_BARE"
+        "AIRPLANES_READSB_REPO=file://$READSB_BARE"
+        "AIRPLANES_READSB_BRANCH=$READSB_BRANCH"
+        "AIRPLANES_FEED_REPO=$feed_repo"
+        "AIRPLANES_TEST_FEED_UPDATE_MODE=$feed_mode"
+        "AIRPLANES_TEST_IS_CHROOT=$is_chroot"
+        "AIRPLANES_PACKAGE_MANAGER=$package_manager"
+    )
+    if [[ "$pass_branch_env" == "1" ]]; then
+        env_args+=(
+            "AIRPLANES_UPDATE_BRANCH=$UPDATE_BRANCH"
+            "AIRPLANES_FEED_BRANCH=$FEED_BRANCH"
+        )
+    fi
+
     set +e
-    PATH="$STUB_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    COMMAND_LOG="$COMMAND_LOG" \
-    FEED_UPDATE_LOG="$FEED_UPDATE_LOG" \
-    TAR1090_LOG="$TAR1090_LOG" \
-    AIRPLANES_ROOT="$ROOT_DIR" \
-    AIRPLANES_UPDATE_REPO="file://$UPDATE_BARE" \
-    AIRPLANES_UPDATE_BRANCH="$UPDATE_BRANCH" \
-    AIRPLANES_READSB_REPO="file://$READSB_BARE" \
-    AIRPLANES_READSB_BRANCH="$READSB_BRANCH" \
-    AIRPLANES_FEED_REPO="$feed_repo" \
-    AIRPLANES_FEED_BRANCH="$FEED_BRANCH" \
-    AIRPLANES_TEST_FEED_UPDATE_MODE="$feed_mode" \
-    AIRPLANES_TEST_IS_CHROOT="$is_chroot" \
-    AIRPLANES_PACKAGE_MANAGER="$package_manager" \
-        bash "$UPDATE_DIR/update-airplanes.sh"
+    env -u AIRPLANES_UPDATE_BRANCH -u AIRPLANES_FEED_BRANCH "${env_args[@]}" bash "$script_path"
     status=$?
     set -e
 
@@ -324,6 +358,32 @@ test_package_manager_override() {
     echo "package-manager override path passed"
 }
 
+test_dev_checkout_defaults_to_dev_branches() {
+    setup_case dev-branch-defaults
+    UPDATE_BRANCH="dev"
+    FEED_BRANCH="dev"
+    prepare_common_fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" dev
+
+    run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "dev checkout default path failed"
+    assert_success_state apt
+    echo "dev checkout branch defaults path passed"
+}
+
+test_raw_script_defaults_to_main_branches() {
+    setup_case raw-main-defaults
+    UPDATE_BRANCH="main"
+    FEED_BRANCH="main"
+    prepare_common_fixture
+    make_raw_update_script "$CASE_DIR/raw-update"
+
+    run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/raw-update/update-airplanes.sh" \
+        || fail "raw script default path failed"
+    assert_success_state apt
+    echo "raw script branch defaults path passed"
+}
+
 test_bad_feed_repo_fails_before_tar1090() {
     setup_case bad-feed-repo
     prepare_common_fixture
@@ -373,6 +433,8 @@ main() {
 
     test_success_path
     test_package_manager_override
+    test_dev_checkout_defaults_to_dev_branches
+    test_raw_script_defaults_to_main_branches
     test_bad_feed_repo_fails_before_tar1090
     test_feed_update_failure_propagates
     test_chroot_skips_feed_update

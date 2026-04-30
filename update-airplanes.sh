@@ -3,12 +3,27 @@ set -e
 trap 'echo "[ERROR] Error in line $LINENO when executing: $BASH_COMMAND"' ERR
 
 AIRPLANES_ROOT="${AIRPLANES_ROOT:-/}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+airplanes_default_branch() {
+    local branch
+    if command -v git &>/dev/null && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        branch="$(git -C "$SCRIPT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+        if [[ "$branch" == "dev" ]]; then
+            printf '%s\n' "dev"
+            return 0
+        fi
+    fi
+    printf '%s\n' "main"
+}
+
+DEFAULT_BRANCH="$(airplanes_default_branch)"
 UPDATE_REPO="${AIRPLANES_UPDATE_REPO:-https://github.com/airplanes-live/airplanes-update.git}"
-UPDATE_BRANCH="${AIRPLANES_UPDATE_BRANCH:-main}"
+UPDATE_BRANCH="${AIRPLANES_UPDATE_BRANCH:-$DEFAULT_BRANCH}"
 READSB_REPO="${AIRPLANES_READSB_REPO:-https://github.com/airplanes-live/readsb.git}"
 READSB_BRANCH="${AIRPLANES_READSB_BRANCH:-}"
 FEED_REPO="${AIRPLANES_FEED_REPO:-https://github.com/airplanes-live/feed.git}"
-FEED_BRANCH="${AIRPLANES_FEED_BRANCH:-main}"
+FEED_BRANCH="${AIRPLANES_FEED_BRANCH:-$DEFAULT_BRANCH}"
 
 airplanes_path() {
     local path="$1"
