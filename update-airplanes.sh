@@ -2,19 +2,57 @@
 set -e
 trap 'echo "[ERROR] Error in line $LINENO when executing: $BASH_COMMAND"' ERR
 
+AIRPLANES_ROOT="${AIRPLANES_ROOT:-/}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+airplanes_default_branch() {
+    local branch
+    if command -v git &>/dev/null && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        branch="$(git -C "$SCRIPT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+        if [[ "$branch" == "dev" ]]; then
+            printf '%s\n' "dev"
+            return 0
+        fi
+    fi
+    printf '%s\n' "main"
+}
+
+DEFAULT_BRANCH="$(airplanes_default_branch)"
+UPDATE_REPO="${AIRPLANES_UPDATE_REPO:-https://github.com/airplanes-live/airplanes-update.git}"
+UPDATE_BRANCH="${AIRPLANES_UPDATE_BRANCH:-$DEFAULT_BRANCH}"
+READSB_REPO="${AIRPLANES_READSB_REPO:-https://github.com/airplanes-live/readsb.git}"
+READSB_BRANCH="${AIRPLANES_READSB_BRANCH:-}"
+FEED_REPO="${AIRPLANES_FEED_REPO:-https://github.com/airplanes-live/feed.git}"
+FEED_BRANCH="${AIRPLANES_FEED_BRANCH:-$DEFAULT_BRANCH}"
+
+airplanes_path() {
+    local path="$1"
+    if [[ "$AIRPLANES_ROOT" == "/" ]]; then
+        printf '%s\n' "$path"
+    else
+        printf '%s\n' "${AIRPLANES_ROOT%/}$path"
+    fi
+}
+
 if [[ "$(id -u)" != "0" ]]; then
-    exec sudo bash "$BASH_SOURCE"
+    exec sudo -E bash -- "${BASH_SOURCE[0]}"
 fi
 
 # let's do all of this in a clean directory:
-updir=/tmp/update-airplanes
+updir="$(airplanes_path /tmp/update-airplanes)"
 
-rm -rf $updir
-mkdir -p $updir
-cd $updir
+cleanup() {
+    rm -rf "$updir"
+}
+trap cleanup EXIT
+
+rm -rf "$updir"
+mkdir -p "$updir"
+cd "$updir"
 
 # in case /var/log is full ... delete some logs
-echo test > /var/log/.test 2>/dev/null || rm -f /var/log/*.log
+mkdir -p "$(airplanes_path /var/log)"
+echo test > "$(airplanes_path /var/log/.test)" 2>/dev/null || rm -f "$(airplanes_path /var/log)"/*.log
 
 restartIfEnabled() {
     # check if enabled
@@ -24,30 +62,37 @@ restartIfEnabled() {
 }
 
 function aptInstall() {
-    if ! apt install -y --no-install-recommends --no-install-suggests "$@"; then
-        apt update
-        apt install -y --no-install-recommends --no-install-suggests "$@"
+    if ! apt-get install -y --no-install-recommends --no-install-suggests "$@"; then
+        apt-get update || true
+        apt-get install -y --no-install-recommends --no-install-suggests "$@"
     fi
 }
 
-packages="git make gcc libusb-1.0-0 libusb-1.0-0-dev librtlsdr0 librtlsdr-dev ncurses-bin ncurses-dev zlib1g zlib1g-dev python3-dev python3-venv libzstd-dev libzstd1"
+packages="git wget make gcc libusb-1.0-0 libusb-1.0-0-dev librtlsdr0 librtlsdr-dev ncurses-bin ncurses-dev zlib1g zlib1g-dev python3-dev python3-venv libzstd-dev libzstd1"
 aptInstall $packages
 
-git clone --quiet --depth 1 https://github.com/airplanes-live/airplanes-update.git
+git clone --quiet --depth 1 --single-branch --branch "$UPDATE_BRANCH" "$UPDATE_REPO" airplanes-update
 cd airplanes-update
 
-find skeleton -type d | cut -d / -f1 --complement | grep -v '^skeleton' | xargs -t -I '{}' -s 2048 mkdir -p /'{}' &>/dev/null
-find skeleton -type f | cut -d / -f1 --complement | xargs -I '{}' -s 2048 cp -T --remove-destination -v skeleton/'{}' /'{}' >/dev/null
+while IFS= read -r -d '' dir; do
+    mkdir -p "$(airplanes_path "/$dir")"
+done < <(find skeleton -mindepth 1 -type d -printf '%P\0')
+
+while IFS= read -r -d '' file; do
+    mkdir -p "$(dirname "$(airplanes_path "/$file")")"
+    cp -T --remove-destination -v "skeleton/$file" "$(airplanes_path "/$file")" >/dev/null
+done < <(find skeleton -type f -printf '%P\0')
 
 # make sure the config has all the options, if not add them with default value:
-for line in $(grep -v -e '^#' -e '^$' boot-configs/airplanes-config.txt); do
-    if ! grep -qs "$(echo $line | cut -d= -f1)" /boot/airplanes-config.txt; then
-        echo $line >> /boot/airplanes-config.txt
+while IFS= read -r line; do
+    key="${line%%=*}"
+    if ! grep -qs "^${key}=" "$(airplanes_path /boot/airplanes-config.txt)"; then
+        echo "$line" >> "$(airplanes_path /boot/airplanes-config.txt)"
     fi
-done
+done < <(grep -v -e '^#' -e '^$' boot-configs/airplanes-config.txt)
 
 # remove strange dhcpcd wait.conf in case it's there
-rm -f /etc/systemd/system/dhcpcd.service.d/wait.conf
+rm -f "$(airplanes_path /etc/systemd/system/dhcpcd.service.d/wait.conf)"
 
 
 systemctl daemon-reload
@@ -69,8 +114,12 @@ for service in $MASK; do
     systemctl mask $service || true
 done &>/dev/null
 
-cd $updir
-git clone --quiet --depth 1 https://github.com/airplanes-live/readsb.git
+cd "$updir"
+readsb_clone_args=(--quiet --depth 1)
+if [[ -n "$READSB_BRANCH" ]]; then
+    readsb_clone_args+=(--single-branch --branch "$READSB_BRANCH")
+fi
+git clone "${readsb_clone_args[@]}" "$READSB_REPO" readsb
 
 echo 'compiling readsb (this can take a while) .......'
 
@@ -83,17 +132,17 @@ else
 fi
 
 echo 'copying new readsb binaries ......'
-cp -f readsb /usr/bin/airplanes-feeder
-cp -f readsb /usr/bin/airplanes-978
-cp -f readsb /usr/bin/readsb
-cp -f viewadsb /usr/bin/viewadsb
+cp -f readsb "$(airplanes_path /usr/bin/airplanes-feeder)"
+cp -f readsb "$(airplanes_path /usr/bin/airplanes-978)"
+cp -f readsb "$(airplanes_path /usr/bin/readsb)"
+cp -f viewadsb "$(airplanes_path /usr/bin/viewadsb)"
 
 
 echo 'make sure unprivileged users exist (readsb / airplanes) ......'
 for USER in airplanes readsb; do
     if ! id -u "${USER}" &>/dev/null
     then
-        adduser --system --home "/usr/local/share/$USER" --no-create-home --quiet "$USER"
+        adduser --system --home "$(airplanes_path "/usr/local/share/$USER")" --no-create-home --quiet "$USER"
     fi
 done
 
@@ -102,63 +151,38 @@ adduser readsb plugdev
 # dialout required for Mode-S Beast and GNS5894 ttyAMA0 access
 adduser readsb dialout
 
-mkdir -p /var/globe_history
-chown readsb /var/globe_history
+mkdir -p "$(airplanes_path /var/globe_history)"
+chown readsb "$(airplanes_path /var/globe_history)"
 
 echo 'restarting services .......'
 restartIfEnabled readsb
 restartIfEnabled airplanes-feed
 restartIfEnabled airplanes-978
 
-cd $updir
-rm -rf $updir/readsb
+cd "$updir"
+rm -rf "$updir/readsb"
 
-
-
-VENV=/usr/local/share/airplanes/venv/
-if [[ -f /usr/local/share/airplanes/venv/bin/python3.7 ]] && command -v python3.9 &>/dev/null;
-then
-    rm -rf "$VENV"
-fi
-rm "$VENV-backup" -rf
-mv "$VENV" "$VENV-backup" -f &>/dev/null || true
-
-cd $updir
-
-echo 'building mlat-client in virtual-environment .......'
-if git clone --quiet --depth 1 --single-branch https://github.com/airplanes-live/mlat-client.git \
-    && cd mlat-client \
-    && /usr/bin/python3 -m venv $VENV  \
-    && source $VENV/bin/activate  \
-    && python3 setup.py build \
-    && python3 setup.py install \
-    && git rev-parse HEAD > $IPATH/mlat_version || rm -f $IPATH/mlat_version \
-; then
-    rm "$VENV-backup" -rf
+if ischroot; then
+    echo 'skipping airplanes.live feed update in chroot'
 else
-    rm "$VENV" -rf
-    mv "$VENV-backup" "$VENV" &>/dev/null || true
-    echo "--------------------"
-    echo "Installing mlat-client failed, if there was an old version it has been restored."
-    echo "Will continue installation to try and get at least the feed client working."
-    echo "Please report this error to the airplanes discord."
-    echo "--------------------"
+    echo 'updating airplanes.live feed components .......'
+    git clone --quiet --depth 1 --single-branch --branch "$FEED_BRANCH" "$FEED_REPO" feed
+    # Other exported AIRPLANES_* overrides, such as MLAT/readsb repos, are inherited by bash.
+    AIRPLANES_ROOT="$AIRPLANES_ROOT" \
+    AIRPLANES_FEED_REPO="$FEED_REPO" \
+    AIRPLANES_FEED_BRANCH="$FEED_BRANCH" \
+    AIRPLANES_PACKAGE_MANAGER="${AIRPLANES_PACKAGE_MANAGER:-apt}" \
+        bash "$updir/feed/update.sh"
+
+    rm -f -R "$updir/feed"
 fi
-
-echo 'starting services .......'
-restartIfEnabled airplanes-mlat
-
-cd $updir
-rm -f -R $updir/mlat-client
-
-cd $updir
 
 echo 'update tar1090 ...........'
 bash -c "$(wget -nv -O - https://raw.githubusercontent.com/airplanes-live/tar1090/master/install.sh)"
 
-if [[ -f /boot/airplanes-config.txt ]]; then
-    if ! grep -qs -e 'GRAPHS1090' /boot/airplanes-config.txt; then
-        echo "GRAPHS1090=yes" >> /boot/airplanes-config.txt
+if [[ -f "$(airplanes_path /boot/airplanes-config.txt)" ]]; then
+    if ! grep -qs -e 'GRAPHS1090' "$(airplanes_path /boot/airplanes-config.txt)"; then
+        echo "GRAPHS1090=yes" >> "$(airplanes_path /boot/airplanes-config.txt)"
     fi
 fi
 
@@ -169,18 +193,14 @@ if ischroot; then
 fi
 
 echo "#####################################"
-cat /boot/airplanes-uuid
+cat "$(airplanes_path /boot/airplanes-uuid)"
 echo "#####################################"
 echo "#####################################"
 
-echo "8.2.$(date '+%y%m%d')" > /boot/airplanes-version-decoder
+echo "8.2.$(date '+%y%m%d')" > "$(airplanes_path /boot/airplanes-version-decoder)"
 
 echo '--------------------------------------------'
 echo '--------------------------------------------'
 echo '             UPDATE COMPLETE'
 echo '--------------------------------------------'
 echo '--------------------------------------------'
-
-
-cd /tmp
-rm -rf $updir

@@ -1,7 +1,7 @@
 #! /bin/bash
 
 
-if [ $(id -u) -ne 0 ]; then
+if [ "$(id -u)" -ne 0 ]; then
   echo -e "This script must be run as root. \n"
   exit 1
 fi
@@ -31,12 +31,12 @@ if ! [[ -d /airplanes/update/boot-configs ]]; then
     exit 1
 fi
 
-pushd /airplanes/update/boot-configs &>/dev/null
+pushd /airplanes/update/boot-configs &>/dev/null || exit
 for file in *; do
     echo -e "\n RESET /boot/$file"
     cp --remove-destination -f -T "$file" "/boot/$file"
 done
-popd &>/dev/null
+popd &>/dev/null || exit
 
 echo -e "\n RESET WPA_SUPPLICANT CONF"
 rm -f /etc/wpa_supplicant/wpa_supplicant.conf
