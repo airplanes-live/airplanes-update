@@ -63,6 +63,27 @@ jobs:
           print(f"checked {len(files)} Python file(s)")
           PY
 
+  migrate-config-drift:
+    name: migrate-config drift vs airplanes-webconfig
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Diff vendored migrate-config.sh against airplanes-webconfig canonical copy
+        env:
+          CANONICAL_URL: https://raw.githubusercontent.com/airplanes-live/airplanes-webconfig/dev/helpers/migrate-config.sh
+          VENDORED_PATH: skeleton/usr/local/lib/airplanes-update/migrate-config.sh
+        run: |
+          curl -fsSL "$CANONICAL_URL" -o /tmp/canonical-migrate-config.sh
+          if ! diff -u /tmp/canonical-migrate-config.sh "$VENDORED_PATH"; then
+            echo "::error::Vendored migrate-config.sh drifted from airplanes-webconfig:dev canonical copy. Sync them."
+            exit 1
+          fi
+
   rootfs-smoke:
     name: update rootfs smoke
     runs-on: ubuntu-24.04
