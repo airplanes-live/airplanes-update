@@ -57,35 +57,9 @@ airplanes_resolve_latest_feed_tag() {
     return 0
 }
 
-# FEED_BRANCH: legacy-bridge delivery channel for feeders updating through
-# this script. Explicit AIRPLANES_FEED_BRANCH env var always wins (used by
-# test fixtures and operator overrides). Otherwise the bridge resolves the
-# latest stable feed tag — by design the bridge is stable-only; there is no
-# airplanes-update/dev user fleet that needs dev-channel pre-release code.
-# Fail closed if no matching tags exist or the lookup itself fails: don't
-# silently fall back to a branch HEAD, which would defeat the entire reason
-# we tag releases (controlled-rollout to the legacy fleet).
-if [[ -n "${AIRPLANES_FEED_BRANCH:-}" ]]; then
-    FEED_BRANCH="$AIRPLANES_FEED_BRANCH"
-else
-    _resolved_tag=""
-    _resolve_rc=0
-    _resolved_tag="$(airplanes_resolve_latest_feed_tag "$FEED_REPO")" || _resolve_rc=$?
-    case $_resolve_rc in
-        0) FEED_BRANCH="$_resolved_tag" ;;
-        1)
-            echo "ERROR: airplanes.live feed has no v[MAJOR].[MINOR].[PATCH] release tags at $FEED_REPO." >&2
-            echo "       The bridge installs only stable feed releases; aborting before touching the legacy stack." >&2
-            exit 1
-            ;;
-        2)
-            echo "ERROR: could not query release tags from $FEED_REPO (network/DNS/TLS failure)." >&2
-            echo "       Aborting before touching the legacy stack." >&2
-            exit 1
-            ;;
-    esac
-    unset _resolved_tag _resolve_rc
-fi
+# FEED_BRANCH resolution is deferred until after sudo re-exec and apt-install
+# (which provides git). See "FEED_BRANCH: legacy-bridge delivery channel"
+# block further down in the script.
 
 airplanes_path() {
     local path="$1"
@@ -132,6 +106,41 @@ function aptInstall() {
 
 packages="git wget make gcc libusb-1.0-0 libusb-1.0-0-dev librtlsdr0 librtlsdr-dev ncurses-bin ncurses-dev zlib1g zlib1g-dev python3-dev python3-venv libzstd-dev libzstd1"
 aptInstall $packages
+
+# FEED_BRANCH: legacy-bridge delivery channel for feeders updating through
+# this script. Explicit AIRPLANES_FEED_BRANCH env var always wins (used by
+# test fixtures and operator overrides). Otherwise the bridge resolves the
+# latest stable feed tag — by design the bridge is stable-only; there is no
+# airplanes-update/dev user fleet that needs dev-channel pre-release code.
+# Fail closed if no matching tags exist or the lookup itself fails: don't
+# silently fall back to a branch HEAD, which would defeat the entire reason
+# we tag releases (controlled-rollout to the legacy fleet).
+#
+# Placed after aptInstall (which provides git) and after the sudo re-exec
+# so resolution happens exactly once, with git available. The only state
+# touched so far is /tmp (cleaned by the EXIT trap on abort) and apt's
+# package set; no skeleton copy, no service touches, no readsb compile.
+if [[ -n "${AIRPLANES_FEED_BRANCH:-}" ]]; then
+    FEED_BRANCH="$AIRPLANES_FEED_BRANCH"
+else
+    _resolved_tag=""
+    _resolve_rc=0
+    _resolved_tag="$(airplanes_resolve_latest_feed_tag "$FEED_REPO")" || _resolve_rc=$?
+    case $_resolve_rc in
+        0) FEED_BRANCH="$_resolved_tag" ;;
+        1)
+            echo "ERROR: airplanes.live feed has no v[MAJOR].[MINOR].[PATCH] release tags at $FEED_REPO." >&2
+            echo "       The bridge installs only stable feed releases; aborting before touching the legacy stack." >&2
+            exit 1
+            ;;
+        2)
+            echo "ERROR: could not query release tags from $FEED_REPO (network/DNS/TLS failure)." >&2
+            echo "       Aborting before touching the legacy stack." >&2
+            exit 1
+            ;;
+    esac
+    unset _resolved_tag _resolve_rc
+fi
 
 git clone --quiet --depth 1 --single-branch --branch "$UPDATE_BRANCH" "$UPDATE_REPO" airplanes-update
 cd airplanes-update

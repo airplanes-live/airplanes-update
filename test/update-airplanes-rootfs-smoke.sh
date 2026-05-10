@@ -412,13 +412,33 @@ test_bridge_fails_closed_when_no_feed_tags() {
     prepare_common_fixture   # no tag args → no tags on fixture
     make_installed_update_checkout "$CASE_DIR/installed-update" dev
 
+    # Seed sentinels that legitimate-success path would clobber so the test
+    # can prove the abort skipped skeleton-copy, service-touches, and
+    # readsb compile entirely.
+    install -d "$ROOT_DIR/etc/systemd/system/dhcpcd.service.d"
+    : > "$ROOT_DIR/etc/systemd/system/dhcpcd.service.d/wait.conf"
+    pre_state_marker="$ROOT_DIR/pre-state-marker"
+    : > "$pre_state_marker"
+
     if run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/installed-update/update-airplanes.sh"; then
         fail "bridge unexpectedly succeeded with no feed tags"
     fi
 
+    # No rootfs mutation past apt-install. The success path would have:
+    #   - removed wait.conf (skeleton copy + cleanup)
+    #   - installed /usr/bin/airplanes-feeder (readsb compile)
+    #   - run feed/update.sh (logs to FEED_UPDATE_LOG)
+    #   - run tar1090 install (logs to TAR1090_LOG)
+    #   - issued systemctl restart for the feed services
+    [[ -f "$ROOT_DIR/etc/systemd/system/dhcpcd.service.d/wait.conf" ]] \
+        || fail "wait.conf removed — skeleton copy ran past fail-closed abort"
+    [[ ! -x "$ROOT_DIR/usr/bin/airplanes-feeder" ]] \
+        || fail "airplanes-feeder installed — readsb compile ran past fail-closed abort"
     [[ ! -f "$ROOT_DIR/usr/local/share/airplanes/feed-update-marker" ]] \
-        || fail "feed update marker exists after fail-closed abort"
-    [[ ! -e "$TAR1090_LOG" ]] || fail "tar1090 ran after bridge fail-closed abort"
+        || fail "feed update marker exists — feed/update.sh ran past fail-closed abort"
+    [[ ! -e "$TAR1090_LOG" ]] || fail "tar1090 ran past fail-closed abort"
+    [[ ! -e "$FEED_UPDATE_LOG" ]] || fail "feed update log exists past fail-closed abort"
+    assert_not_contains "$COMMAND_LOG" '^systemctl restart '
     echo "bridge fail-closed on missing feed tags — passed"
 }
 
