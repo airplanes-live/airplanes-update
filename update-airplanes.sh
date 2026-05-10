@@ -23,7 +23,69 @@ UPDATE_BRANCH="${AIRPLANES_UPDATE_BRANCH:-$DEFAULT_BRANCH}"
 READSB_REPO="${AIRPLANES_READSB_REPO:-https://github.com/airplanes-live/readsb.git}"
 READSB_BRANCH="${AIRPLANES_READSB_BRANCH:-}"
 FEED_REPO="${AIRPLANES_FEED_REPO:-https://github.com/airplanes-live/feed.git}"
-FEED_BRANCH="${AIRPLANES_FEED_BRANCH:-$DEFAULT_BRANCH}"
+
+# Resolve the latest semver-strict release tag from the feed remote.
+# Strict format: vMAJOR.MINOR.PATCH with no leading zeroes, no prereleases.
+# Mirrors the resolver in airplanes-live/feed's scripts/lib/install-update-common.sh
+# so the bridge picks the same tag the feeders themselves would resolve.
+# Echoes the tag name on success.
+# Returns 0 = found, 1 = lookup OK but no matching tags, 2 = lookup itself failed.
+airplanes_resolve_latest_feed_tag() {
+    local repo="${1:-$FEED_REPO}"
+    local refs latest=""
+    if ! refs="$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs "$repo" 2>/dev/null)"; then
+        return 2
+    fi
+    if [[ -z "$refs" ]]; then
+        return 1
+    fi
+    local _sha _refname _tag
+    while IFS=$'\t' read -r _sha _refname; do
+        _tag="${_refname#refs/tags/}"
+        if [[ "$_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            if [[ -z "$latest" ]]; then
+                latest="$_tag"
+            else
+                latest="$(printf '%s\n%s\n' "$latest" "$_tag" | sort -V | tail -n 1)"
+            fi
+        fi
+    done <<< "$refs"
+    if [[ -z "$latest" ]]; then
+        return 1
+    fi
+    printf '%s' "$latest"
+    return 0
+}
+
+# FEED_BRANCH: legacy-bridge delivery channel for feeders updating through
+# this script. Explicit AIRPLANES_FEED_BRANCH env var always wins (used by
+# test fixtures and operator overrides). Otherwise the bridge resolves the
+# latest stable feed tag — by design the bridge is stable-only; there is no
+# airplanes-update/dev user fleet that needs dev-channel pre-release code.
+# Fail closed if no matching tags exist or the lookup itself fails: don't
+# silently fall back to a branch HEAD, which would defeat the entire reason
+# we tag releases (controlled-rollout to the legacy fleet).
+if [[ -n "${AIRPLANES_FEED_BRANCH:-}" ]]; then
+    FEED_BRANCH="$AIRPLANES_FEED_BRANCH"
+else
+    _resolved_tag=""
+    _resolve_rc=0
+    _resolved_tag="$(airplanes_resolve_latest_feed_tag "$FEED_REPO")" || _resolve_rc=$?
+    case $_resolve_rc in
+        0) FEED_BRANCH="$_resolved_tag" ;;
+        1)
+            echo "ERROR: airplanes.live feed has no v[MAJOR].[MINOR].[PATCH] release tags at $FEED_REPO." >&2
+            echo "       The bridge installs only stable feed releases; aborting before touching the legacy stack." >&2
+            exit 1
+            ;;
+        2)
+            echo "ERROR: could not query release tags from $FEED_REPO (network/DNS/TLS failure)." >&2
+            echo "       Aborting before touching the legacy stack." >&2
+            exit 1
+            ;;
+    esac
+    unset _resolved_tag _resolve_rc
+fi
 
 airplanes_path() {
     local path="$1"

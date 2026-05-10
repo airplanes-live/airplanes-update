@@ -77,12 +77,19 @@ make_repo() {
     local source="$1"
     local branch="$2"
     local bare="$3"
+    shift 3
+    # Remaining args are tags to attach to the single commit. Used by the
+    # feed-repo fixture to exercise the bridge's tag resolver.
+    local tag
 
     git -C "$source" init -q -b "$branch"
     git -C "$source" config user.email "rootfs-smoke@example.invalid"
     git -C "$source" config user.name "Rootfs Smoke"
     git -C "$source" add .
     git -C "$source" commit -q -m "rootfs smoke fixture"
+    for tag in "$@"; do
+        git -C "$source" tag "$tag"
+    done
     git clone --quiet --bare "$source" "$bare"
 }
 
@@ -127,6 +134,11 @@ MAKE
 }
 
 make_feed_repo() {
+    # Optional tag list: caller can pass tags after FEED_BRANCH. Default is
+    # no tags, which forces the bridge's stable-tag resolver to fail closed
+    # — matches what most callers want (they explicitly set
+    # AIRPLANES_FEED_BRANCH to bypass resolution).
+    local -a feed_tags=("$@")
     mkdir -p "$FEED_SOURCE"
     cat > "$FEED_SOURCE/update.sh" <<'SH'
 #!/usr/bin/env bash
@@ -153,7 +165,7 @@ printf '%s\n' '11111111-2222-3333-4444-555555555555' > "$AIRPLANES_ROOT/boot/air
 printf '%s\n' 'feed update ran' > "$AIRPLANES_ROOT/usr/local/share/airplanes/feed-update-marker"
 SH
     chmod +x "$FEED_SOURCE/update.sh"
-    make_repo "$FEED_SOURCE" "$FEED_BRANCH" "$FEED_BARE"
+    make_repo "$FEED_SOURCE" "$FEED_BRANCH" "$FEED_BARE" "${feed_tags[@]}"
 }
 
 prepare_rootfs() {
@@ -266,7 +278,7 @@ run_update() {
 prepare_common_fixture() {
     make_update_repo
     make_readsb_repo
-    make_feed_repo
+    make_feed_repo "$@"
     prepare_rootfs
     write_stubs
 }
@@ -358,30 +370,72 @@ test_package_manager_override() {
     echo "package-manager override path passed"
 }
 
-test_dev_checkout_defaults_to_dev_branches() {
-    setup_case dev-branch-defaults
+test_dev_checkout_pulls_update_dev_resolves_feed_tag() {
+    # airplanes-update/dev checkout: UPDATE_BRANCH defaults to "dev" (the
+    # script's own branch). FEED_BRANCH is no longer branch-derived — the
+    # bridge always resolves the latest stable feed tag via git ls-remote,
+    # regardless of the script's checkout branch.
+    setup_case dev-checkout-resolves-feed-tag
     UPDATE_BRANCH="dev"
-    FEED_BRANCH="dev"
-    prepare_common_fixture
+    FEED_BRANCH="v0.1.0"
+    prepare_common_fixture v0.1.0
     make_installed_update_checkout "$CASE_DIR/installed-update" dev
 
     run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/installed-update/update-airplanes.sh" \
-        || fail "dev checkout default path failed"
+        || fail "dev checkout resolver path failed"
     assert_success_state apt
-    echo "dev checkout branch defaults path passed"
+    echo "dev checkout pulls update/dev, resolves feed at latest stable tag — passed"
 }
 
-test_raw_script_defaults_to_main_branches() {
-    setup_case raw-main-defaults
+test_raw_script_pulls_update_main_resolves_feed_tag() {
+    # No-checkout (curl-piped) airplanes-update: DEFAULT_BRANCH falls back
+    # to "main". Same as above, FEED_BRANCH is resolver-driven not
+    # branch-derived.
+    setup_case raw-script-resolves-feed-tag
     UPDATE_BRANCH="main"
-    FEED_BRANCH="main"
-    prepare_common_fixture
+    FEED_BRANCH="v0.1.0"
+    prepare_common_fixture v0.1.0
     make_raw_update_script "$CASE_DIR/raw-update"
 
     run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/raw-update/update-airplanes.sh" \
-        || fail "raw script default path failed"
+        || fail "raw script resolver path failed"
     assert_success_state apt
-    echo "raw script branch defaults path passed"
+    echo "raw script pulls update/main, resolves feed at latest stable tag — passed"
+}
+
+test_bridge_fails_closed_when_no_feed_tags() {
+    # Fixture feed has no v* tags. The resolver returns 1 (no matching
+    # tags) and the bridge aborts before touching the legacy stack.
+    setup_case no-feed-tags-fails-closed
+    UPDATE_BRANCH="dev"
+    FEED_BRANCH="dev"
+    prepare_common_fixture   # no tag args → no tags on fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" dev
+
+    if run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/installed-update/update-airplanes.sh"; then
+        fail "bridge unexpectedly succeeded with no feed tags"
+    fi
+
+    [[ ! -f "$ROOT_DIR/usr/local/share/airplanes/feed-update-marker" ]] \
+        || fail "feed update marker exists after fail-closed abort"
+    [[ ! -e "$TAR1090_LOG" ]] || fail "tar1090 ran after bridge fail-closed abort"
+    echo "bridge fail-closed on missing feed tags — passed"
+}
+
+test_bridge_resolves_highest_semver_tag() {
+    # Fixture feed has multiple v* tags. Resolver picks the highest semver.
+    # Mixed bag includes prerelease and leading-zero tags that must be
+    # ignored (mirror feed-side regex).
+    setup_case bridge-picks-highest-semver
+    UPDATE_BRANCH="dev"
+    FEED_BRANCH="v1.0.0"
+    prepare_common_fixture v0.1.0 v0.2.0 v0.2.0-rc.1 v01.02.03 v1.0.0
+    make_installed_update_checkout "$CASE_DIR/installed-update" dev
+
+    run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "highest-semver resolver path failed"
+    assert_success_state apt
+    echo "bridge picks highest semver tag — passed"
 }
 
 test_bad_feed_repo_fails_before_tar1090() {
@@ -433,8 +487,10 @@ main() {
 
     test_success_path
     test_package_manager_override
-    test_dev_checkout_defaults_to_dev_branches
-    test_raw_script_defaults_to_main_branches
+    test_dev_checkout_pulls_update_dev_resolves_feed_tag
+    test_raw_script_pulls_update_main_resolves_feed_tag
+    test_bridge_fails_closed_when_no_feed_tags
+    test_bridge_resolves_highest_semver_tag
     test_bad_feed_repo_fails_before_tar1090
     test_feed_update_failure_propagates
     test_chroot_skips_feed_update
