@@ -26,6 +26,9 @@
 #     restricts to [A-Za-z0-9_.-]).
 #   - When USER is absent, the file is treated as already on the new
 #     schema and not touched.
+#   - Empty USER (USER="") is treated as "opted in, no name" and
+#     produces MLAT_USER="Anonymous" / MLAT_ENABLED=true, matching the
+#     defaults in feed/configure.sh and feed/scripts/apl-feed/mlat.sh.
 #
 # Env vars:
 #   AIRPLANES_CONFIG_LOCK_HELD=1   Skip flock (caller already holds it).
@@ -128,6 +131,14 @@ derive_mlat_from_user() {
         0|disable)
             MLAT_USER_OUT=""
             MLAT_ENABLED_OUT="false"
+            ;;
+        '')
+            # Empty USER → "Anonymous" so the daemon's strict-fail on
+            # empty MLAT_USER + MLAT_ENABLED=true never fires. Mirrors
+            # the writer-side defaults in feed/configure.sh and
+            # feed/scripts/apl-feed/mlat.sh.
+            MLAT_USER_OUT="Anonymous"
+            MLAT_ENABLED_OUT="true"
             ;;
         *)
             MLAT_USER_OUT="$user"
