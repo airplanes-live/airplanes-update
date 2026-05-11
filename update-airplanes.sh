@@ -91,6 +91,22 @@ while IFS= read -r line; do
     fi
 done < <(grep -v -e '^#' -e '^$' boot-configs/airplanes-config.txt)
 
+# Translate the legacy USER= key into the split MLAT_USER + MLAT_ENABLED
+# schema expected by the new feed daemons. Idempotent (byte-compares before
+# rewriting); safe to run on every update. Must run BEFORE delegating to
+# feed/update.sh so the new wrappers see a migrated config.
+migrator="$(airplanes_path /usr/local/lib/airplanes-update/migrate-config.sh)"
+config_file="$(airplanes_path /boot/airplanes-config.txt)"
+# Use -r (readable), not -x: we invoke via `bash "$migrator"`, which only
+# needs the file to be readable. An install path that drops the exec bit
+# (cp without -p, archive extraction with neutral mode) would otherwise
+# silently skip the migration and surface as a confusing "Run Update
+# Webconfig" error from feed's strict guard on the next daemon start.
+if [[ -r "$migrator" && -f "$config_file" ]]; then
+    bash "$migrator" "$config_file"
+fi
+unset migrator config_file
+
 # remove strange dhcpcd wait.conf in case it's there
 rm -f "$(airplanes_path /etc/systemd/system/dhcpcd.service.d/wait.conf)"
 
@@ -197,7 +213,7 @@ cat "$(airplanes_path /boot/airplanes-uuid)"
 echo "#####################################"
 echo "#####################################"
 
-echo "8.2.$(date '+%y%m%d')" > "$(airplanes_path /boot/airplanes-version-decoder)"
+echo "8.3.$(date '+%y%m%d')" > "$(airplanes_path /boot/airplanes-version-decoder)"
 
 echo '--------------------------------------------'
 echo '--------------------------------------------'

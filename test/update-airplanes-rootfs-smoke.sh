@@ -314,7 +314,9 @@ assert_success_state() {
     [[ ! -e "$ROOT_DIR/etc/systemd/system/dhcpcd.service.d/wait.conf" ]] || fail "wait.conf was not removed"
     [[ ! -e "$ROOT_DIR/tmp/update-airplanes" ]] || fail "temporary updater directory was not removed"
 
-    assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^USER=preserved-user$'
+    assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^USER="preserved-user"$'
+    assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^MLAT_USER="preserved-user"$'
+    assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^MLAT_ENABLED=true$'
     assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^DUMP1090=no$'
     assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^LATITUDE=0.00000$'
     assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^GRAPHS1090=yes$'

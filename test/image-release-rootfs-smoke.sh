@@ -356,7 +356,9 @@ assert_updated_image() {
     [[ ! -e "$ROOT_MNT/etc/systemd/system/dhcpcd.service.d/wait.conf" ]] || fail "wait.conf was not removed"
     [[ ! -e "$ROOT_MNT/tmp/update-airplanes" ]] || fail "temporary updater directory was not removed"
 
-    assert_contains "$ROOT_MNT/boot/airplanes-config.txt" '^USER=release-rootfs-smoke$'
+    assert_contains "$ROOT_MNT/boot/airplanes-config.txt" '^USER="release-rootfs-smoke"$'
+    assert_contains "$ROOT_MNT/boot/airplanes-config.txt" '^MLAT_USER="release-rootfs-smoke"$'
+    assert_contains "$ROOT_MNT/boot/airplanes-config.txt" '^MLAT_ENABLED=true$'
     assert_contains "$ROOT_MNT/boot/airplanes-config.txt" '^DUMP1090=no$'
     assert_contains "$ROOT_MNT/boot/airplanes-config.txt" '^LATITUDE='
     assert_contains "$ROOT_MNT/boot/airplanes-config.txt" '^GRAPHS1090=yes$'
