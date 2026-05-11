@@ -97,7 +97,12 @@ done < <(grep -v -e '^#' -e '^$' boot-configs/airplanes-config.txt)
 # feed/update.sh so the new wrappers see a migrated config.
 migrator="$(airplanes_path /usr/local/lib/airplanes-update/migrate-config.sh)"
 config_file="$(airplanes_path /boot/airplanes-config.txt)"
-if [[ -x "$migrator" && -f "$config_file" ]]; then
+# Use -r (readable), not -x: we invoke via `bash "$migrator"`, which only
+# needs the file to be readable. An install path that drops the exec bit
+# (cp without -p, archive extraction with neutral mode) would otherwise
+# silently skip the migration and surface as a confusing "Run Update
+# Webconfig" error from feed's strict guard on the next daemon start.
+if [[ -r "$migrator" && -f "$config_file" ]]; then
     bash "$migrator" "$config_file"
 fi
 unset migrator config_file
