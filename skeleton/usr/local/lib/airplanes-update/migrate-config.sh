@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# migrate-config.sh - Migrate legacy USER= schema in airplanes-config.txt
-# to the split MLAT_USER + MLAT_ENABLED schema expected by the new feed
-# daemons in airplanes-live/feed.
+# migrate-config.sh - Migrate legacy boot-config keys to the canonical
+# schema expected by the new feed daemons in airplanes-live/feed.
 #
 # Canonical home: airplanes-live/airplanes-webconfig:helpers/migrate-config.sh
 # Vendored byte-equivalent copy: airplanes-live/airplanes-update:
@@ -9,34 +8,64 @@
 # Drift between the two is enforced by a CI test in airplanes-update.
 #
 # Usage:
-#   migrate-config.sh <path>            apply migration in-place
+#   migrate-config.sh <path>            apply migrations in-place
 #   migrate-config.sh --version         print MIGRATOR_VERSION and exit
 #
-# Behavior:
-#   - Idempotent. Byte-compares the rendered output against the input;
-#     only mv's if different (mtime unchanged on no-op).
+# Migrations run, in order:
+#
+#   1. USER → MLAT_USER + MLAT_ENABLED  (do_migrate calls _migrate_user_to_split)
+#
+#      - USER="0" or USER="disable"  → MLAT_USER="", MLAT_ENABLED=false
+#      - USER=""                     → MLAT_USER="Anonymous", MLAT_ENABLED=true
+#                                      (matches feed/configure.sh's default;
+#                                      avoids the daemon's empty-MLAT_USER fail)
+#      - USER=<other>                → MLAT_USER=<value>, MLAT_ENABLED=true
+#      - USER absent                 → no-op
+#
+#      USER is preserved on disk in normalized `USER="<escaped>"` form so
+#      legacy consumers that still key off USER keep working. Backup at
+#      `<path>.pre-mlat-split` written once on first transition out of
+#      pure-legacy state.
+#
+#   2. MLAT_MARKER → MLAT_PRIVATE  (do_migrate calls _migrate_marker_to_private)
+#
+#      - MLAT_MARKER="no"            → MLAT_PRIVATE=true   (inverted polarity)
+#      - MLAT_MARKER="yes"           → MLAT_PRIVATE=false
+#      - MLAT_MARKER=<other>         → exit 2 (strict-fail; privacy keys
+#                                      must not silently default to public)
+#      - MLAT_MARKER absent          → no-op
+#
+#      Case-insensitive (PHP webconfig's yes/no dropdown matches uppercase
+#      values too). MLAT_MARKER is PRESERVED on the file alongside the
+#      newly emitted MLAT_PRIVATE: PHP webconfig (deprecating; archived
+#      after MVP soak) rebuilds airplanes-config.txt from $_POST and would
+#      strip MLAT_PRIVATE on the next save without a corresponding form
+#      control. Keeping MLAT_MARKER lets the legacy writer keep working;
+#      the migrator re-derives MLAT_PRIVATE from MLAT_MARKER on every save,
+#      mirroring USER → MLAT_USER re-derivation above. MLAT_MARKER wins
+#      when both keys are present. Backup at `<path>.pre-marker-split`.
+#
+# Behavior shared by all migrations:
+#   - Idempotent. Each migration byte-compares its rendered output against
+#     the input and only mv's if different (mtime unchanged on no-op).
 #   - Never sources the file. Sourcing would execute user-supplied shell.
 #   - Atomic via mktemp adjacent + mv.
-#   - On first migration of a legacy file (USER present, MLAT_USER absent)
-#     writes a `.pre-mlat-split` backup. Idempotent: never overwritten.
-#   - When USER is present it is authoritative: any stale MLAT_USER /
-#     MLAT_ENABLED lines are stripped and re-derived. The USER= line is
-#     re-emitted in `USER="<escaped>"` form for shell-meta safety
-#     (defense for hand-edited files; PHP webconfig sanitize already
-#     restricts to [A-Za-z0-9_.-]).
-#   - When USER is absent, the file is treated as already on the new
-#     schema and not touched.
-#   - Empty USER (USER="") is treated as "opted in, no name" and
-#     produces MLAT_USER="Anonymous" / MLAT_ENABLED=true, matching the
-#     defaults in feed/configure.sh and feed/scripts/apl-feed/mlat.sh.
+#   - Single flock around the chain. Each migration assumes the caller
+#     holds the lock; nested invocations re-enter via AIRPLANES_CONFIG_LOCK_HELD.
 #
 # Env vars:
-#   AIRPLANES_CONFIG_LOCK_HELD=1   Skip flock (caller already holds it).
-#                                  Used by install-adsbconfig.sh wrapper.
+#   AIRPLANES_CONFIG_LOCK_HELD=1     Skip flock (caller already holds it).
+#                                    Used by install-adsbconfig.sh wrapper.
+#   AIRPLANES_CONFIG_BACKUP_BASE     Override path prefix for `.pre-X-split`
+#                                    backups. Defaults to the migrated file's
+#                                    path. install-adsbconfig.sh sets this to
+#                                    /boot/airplanes-config.txt so backups land
+#                                    at the canonical location even when the
+#                                    migrator runs on a random temp file.
 
 set -euo pipefail
 
-MIGRATOR_VERSION=1
+MIGRATOR_VERSION=2
 LOCK_FILE="/var/lock/airplanes-config.lock"
 
 # Extract the last-wins value of KEY from FILE without sourcing it.
@@ -147,10 +176,28 @@ derive_mlat_from_user() {
     esac
 }
 
-# Run the migration on $path. Caller is responsible for the lock.
-do_migrate() {
+# Decide MLAT_PRIVATE from a MLAT_MARKER value per migration rules.
+# Sets caller-scope variable MLAT_PRIVATE_OUT. Inverted polarity: legacy
+# MLAT_MARKER="no" meant privacy ON. Case-insensitive: PHP webconfig's
+# dropdown handles uppercase, so the migrator does too. Strict-fail on
+# anything else — for a privacy key, silently defaulting to public on
+# unrecognized input is the wrong failure mode.
+derive_private_from_marker() {
+    local marker="${1,,}"
+    case "$marker" in
+        no)  MLAT_PRIVATE_OUT="true" ;;
+        yes) MLAT_PRIVATE_OUT="false" ;;
+        *)
+            printf 'migrate-config.sh: unrecognized MLAT_MARKER value: %s\n' "$1" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# Migration 1: USER → MLAT_USER + MLAT_ENABLED. Caller holds the lock.
+_migrate_user_to_split() {
     local path="$1"
-    local backup_path="${path}.pre-mlat-split"
+    local backup_path="${AIRPLANES_CONFIG_BACKUP_BASE:-$path}.pre-mlat-split"
 
     local user_value="" user_present=0 mlat_user_present=0 rc
 
@@ -257,6 +304,116 @@ do_migrate() {
 
     mv -f "$tmp" "$path"
     trap - EXIT
+}
+
+# Migration 2: MLAT_MARKER → MLAT_PRIVATE. Caller holds the lock.
+#
+# MLAT_MARKER is preserved on disk because PHP webconfig is still the only
+# writer of /boot/airplanes-config.txt and only knows about MLAT_MARKER;
+# stripping it would cause the next PHP save (which rebuilds from $_POST)
+# to drop both keys. So this migration co-emits MLAT_PRIVATE alongside
+# MLAT_MARKER and re-derives MLAT_PRIVATE on every save — mirroring the
+# USER → MLAT_USER re-derivation pattern above.
+#
+# Conflict rule: MLAT_MARKER wins when both keys are present (PHP is the
+# active writer; any existing MLAT_PRIVATE is re-derived).
+_migrate_marker_to_private() {
+    local path="$1"
+    local backup_path="${AIRPLANES_CONFIG_BACKUP_BASE:-$path}.pre-marker-split"
+
+    local marker_value="" marker_present=0
+    local mlat_private_present=0 rc
+
+    if marker_value="$(extract_key "$path" MLAT_MARKER)"; then
+        marker_present=1
+    else
+        rc=$?
+        case "$rc" in
+            1) marker_present=0 ;;
+            2) exit 2 ;;
+            *) exit "$rc" ;;
+        esac
+    fi
+
+    if extract_key "$path" MLAT_PRIVATE >/dev/null; then
+        mlat_private_present=1
+    else
+        rc=$?
+        case "$rc" in
+            1) mlat_private_present=0 ;;
+            2) exit 2 ;;
+            *) exit "$rc" ;;
+        esac
+    fi
+
+    # MLAT_MARKER absent → nothing to translate. MLAT_PRIVATE (if present)
+    # is left alone so feeders without PHP webconfig keep whatever
+    # canonical value was written by another writer.
+    if (( ! marker_present )); then
+        return 0
+    fi
+
+    # MLAT_MARKER is authoritative: any stale MLAT_PRIVATE is stripped
+    # and re-derived from MLAT_MARKER.
+    local MLAT_PRIVATE_OUT=""
+    derive_private_from_marker "$marker_value"
+
+    # Backup once on first transition out of pure-legacy (MLAT_MARKER
+    # present, MLAT_PRIVATE absent). Never overwritten.
+    if [[ ! -f "$backup_path" ]] && (( ! mlat_private_present )); then
+        cp -fp "$path" "$backup_path"
+    fi
+
+    # Render new output. The first MLAT_MARKER line becomes the anchor:
+    # the line itself is preserved (legacy writer keeps working), and
+    # MLAT_PRIVATE is emitted on the line immediately after. Subsequent
+    # MLAT_MARKER= duplicates and any existing MLAT_PRIVATE= lines are
+    # dropped.
+    local tmp
+    tmp="$(mktemp "${path}.XXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp'" EXIT
+
+    {
+        local line trimmed marker_seen=0
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            trimmed="${line%$'\r'}"
+            case "$trimmed" in
+                'MLAT_MARKER='*)
+                    if (( ! marker_seen )); then
+                        printf '%s\n' "$line"
+                        printf 'MLAT_PRIVATE=%s\n' "$MLAT_PRIVATE_OUT"
+                        marker_seen=1
+                    fi
+                    ;;
+                'MLAT_PRIVATE='*)
+                    : # drop; re-emitted at the MLAT_MARKER anchor above
+                    ;;
+                *)
+                    printf '%s\n' "$line"
+                    ;;
+            esac
+        done < "$path"
+    } > "$tmp"
+
+    chmod --reference="$path" "$tmp" 2>/dev/null || chmod 0644 "$tmp"
+    chown --reference="$path" "$tmp" 2>/dev/null || true
+
+    if cmp -s "$path" "$tmp"; then
+        rm -f "$tmp"
+        trap - EXIT
+        return 0
+    fi
+
+    mv -f "$tmp" "$path"
+    trap - EXIT
+}
+
+# Run the chain of migrations on $path. Caller is responsible for the lock.
+do_migrate() {
+    local path="$1"
+    _migrate_user_to_split "$path"
+    _migrate_marker_to_private "$path"
 }
 
 main() {
