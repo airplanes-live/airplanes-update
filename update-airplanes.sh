@@ -23,21 +23,18 @@ UPDATE_BRANCH="${AIRPLANES_UPDATE_BRANCH:-$DEFAULT_BRANCH}"
 READSB_REPO="${AIRPLANES_READSB_REPO:-https://github.com/airplanes-live/readsb.git}"
 READSB_BRANCH="${AIRPLANES_READSB_BRANCH:-}"
 FEED_REPO="${AIRPLANES_FEED_REPO:-https://github.com/airplanes-live/feed.git}"
-# FEED_BRANCH is the bootstrap clone ref for the bridge's own copy of
-# feed/ (just enough to get feed/update.sh on disk). It is NOT what
-# ends up installed — feed/update.sh self-replaces and re-execs from
-# the resolved tag (or the AIRPLANES_FEED_BRANCH override) once it is
-# running. Two operator-facing edge cases:
-#   - AIRPLANES_FEED_BRANCH=stable is feed's sentinel for "resolve via
-#     release-channel"; no real branch is named that. Fall through to
-#     DEFAULT_BRANCH for the bootstrap clone, then still pass the
-#     sentinel to feed via AIRPLANES_FEED_BRANCH below.
-#   - empty / unset: auto-detect from the bridge's own checkout
-#     (main / dev).
-FEED_BRANCH="${AIRPLANES_FEED_BRANCH:-$DEFAULT_BRANCH}"
-if [[ "$FEED_BRANCH" == "stable" ]]; then
-    FEED_BRANCH="$DEFAULT_BRANCH"
-fi
+# operator_feed_branch captures the raw AIRPLANES_FEED_BRANCH env var so
+# the bootstrap clone branch (FEED_BRANCH, computed after the release-
+# channel block below) can distinguish:
+#   - operator set a concrete branch (dev / main / feature ref) → use it
+#   - operator set the "stable" sentinel (feed/update.sh resolves via
+#     release-channel) → no real branch named that; derive bootstrap
+#     branch from release-channel
+#   - operator left it unset → derive bootstrap branch from release-
+#     channel (the channel is the operator's intent; the bridge's own
+#     auto-detected checkout is incidental and must not leak into the
+#     installed feed)
+operator_feed_branch="${AIRPLANES_FEED_BRANCH:-}"
 
 airplanes_path() {
     local path="$1"
@@ -141,7 +138,13 @@ if ! ischroot; then
     release_channel_raw=""
     if [[ -r "$release_channel_file" ]]; then
         release_channel_raw="$(head -n1 "$release_channel_file" 2>/dev/null || true)"
-        release_channel_existing="$(printf '%s' "$release_channel_raw" | tr -d '[:space:]')"
+        # Trim only leading and trailing whitespace, not internal —
+        # otherwise a typo like "sta ble" or "de v" would be silently
+        # normalised to "stable" / "dev" and the typo-surfaces-loudly
+        # principle (operator hand-edits must not be auto-corrected)
+        # would be quietly broken.
+        release_channel_existing="${release_channel_raw#"${release_channel_raw%%[![:space:]]*}"}"
+        release_channel_existing="${release_channel_existing%"${release_channel_existing##*[![:space:]]}"}"
     fi
     case "$release_channel_existing" in
         stable|main|dev)
@@ -172,6 +175,21 @@ if ! ischroot; then
             ;;
     esac
     unset release_channel_file release_channel_raw
+fi
+
+# Compute FEED_BRANCH (the bootstrap clone ref for the bridge's own copy
+# of feed/) AFTER the release-channel block — see operator_feed_branch
+# comment at the top of the file. For an unset or "stable" sentinel the
+# bootstrap branch is channel-driven; otherwise the operator override
+# wins verbatim.
+if [[ -z "$operator_feed_branch" || "$operator_feed_branch" == "stable" ]]; then
+    case "${release_channel_existing:-stable}" in
+        dev)              FEED_BRANCH="dev" ;;
+        stable|main|"")   FEED_BRANCH="main" ;;
+        *)                FEED_BRANCH="$DEFAULT_BRANCH" ;;
+    esac
+else
+    FEED_BRANCH="$operator_feed_branch"
 fi
 
 # remove strange dhcpcd wait.conf in case it's there
