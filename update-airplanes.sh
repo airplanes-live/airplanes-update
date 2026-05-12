@@ -123,14 +123,28 @@ unset migrator config_file
 # and a chroot run of this bridge shouldn't second-guess that.
 if ! ischroot; then
     release_channel_file="$(airplanes_path /etc/airplanes/release-channel)"
-    if [[ ! -s "$release_channel_file" ]]; then
-        mkdir -p "$(dirname "$release_channel_file")"
-        release_channel_tmp="$(mktemp "${release_channel_file}.XXXXXX")"
-        chmod 0644 "$release_channel_tmp"
-        printf 'stable\n' > "$release_channel_tmp"
-        mv -f "$release_channel_tmp" "$release_channel_file"
-        unset release_channel_tmp
+    release_channel_existing=""
+    if [[ -r "$release_channel_file" ]]; then
+        release_channel_existing="$(head -n1 "$release_channel_file" 2>/dev/null | tr -d '[:space:]')"
     fi
+    case "$release_channel_existing" in
+        stable|main|dev)
+            # Valid value present — leave it alone (operator pin, or
+            # previous seed).
+            ;;
+        *)
+            # Empty, whitespace-only, or invalid value (e.g. truncated
+            # write like `sta`, or a hand-edit feed's strict allowlist
+            # would reject). Self-heal to stable via temp + rename.
+            mkdir -p "$(dirname "$release_channel_file")"
+            release_channel_tmp="$(mktemp "${release_channel_file}.XXXXXX")"
+            chmod 0644 "$release_channel_tmp"
+            printf 'stable\n' > "$release_channel_tmp"
+            mv -f "$release_channel_tmp" "$release_channel_file"
+            release_channel_existing="stable"
+            unset release_channel_tmp
+            ;;
+    esac
     unset release_channel_file
 fi
 
@@ -227,18 +241,38 @@ else
     else
         # No-tags-yet fallback. feed/update.sh on the stable channel
         # aborts with "no v[MAJOR].[MINOR].[PATCH] tags exist" when the
-        # remote has no semver tags. Until v0.1.0 is cut, that's the
-        # state of airplanes-live/feed — so on a real bridge run today
-        # the deferred-resolution path would refuse to update.
-        # Preflight: if the operator hasn't pinned AIRPLANES_FEED_BRANCH
-        # and the feed remote has no semver tags yet, fall back to
-        # passing the bridge's own FEED_BRANCH (main / dev) so the box
-        # keeps updating. This branch becomes a no-op once tags exist.
-        if ! git ls-remote --tags --refs "$FEED_REPO" 2>/dev/null \
-            | grep -Eq 'refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
-            echo "no semver tags on $FEED_REPO yet; pinning AIRPLANES_FEED_BRANCH=$FEED_BRANCH as a transitional measure" >&2
-            feed_env_args+=("AIRPLANES_FEED_BRANCH=$FEED_BRANCH")
+        # remote has no semver tags. Until v0.1.0 is cut on
+        # airplanes-live/feed, that's the production state — so a real
+        # bridge run today on the deferred-resolution path would refuse
+        # to update. Preflight: query the feed remote for tags. Three
+        # outcomes:
+        #   - query succeeds + has semver tag → defer to feed
+        #   - query succeeds + no semver tag → fall back to a concrete
+        #     branch chosen from the (validated) release-channel:
+        #       dev          → dev
+        #       stable/main  → bridge's own FEED_BRANCH
+        #   - query fails (network/DNS/TLS) → don't fall back; let feed/
+        #     update.sh surface its own structured network error rather
+        #     than mask the failure by silently pinning a branch.
+        # The fallback becomes a no-op once v0.1.0 exists upstream.
+        feed_tag_refs=""
+        if feed_tag_refs="$(git ls-remote --tags --refs "$FEED_REPO" 2>/dev/null)"; then
+            if ! grep -Eq 'refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' <<<"$feed_tag_refs"; then
+                case "${release_channel_existing:-stable}" in
+                    dev)
+                        echo "no semver tags on $FEED_REPO yet; release-channel=dev, pinning AIRPLANES_FEED_BRANCH=dev as a transitional measure" >&2
+                        feed_env_args+=("AIRPLANES_FEED_BRANCH=dev")
+                        ;;
+                    *)
+                        echo "no semver tags on $FEED_REPO yet; pinning AIRPLANES_FEED_BRANCH=$FEED_BRANCH as a transitional measure" >&2
+                        feed_env_args+=("AIRPLANES_FEED_BRANCH=$FEED_BRANCH")
+                        ;;
+                esac
+            fi
+        else
+            echo "warning: could not query $FEED_REPO for tags; deferring to feed/update.sh's network-error handling" >&2
         fi
+        unset feed_tag_refs
     fi
     # Other exported AIRPLANES_* overrides (MLAT/readsb repos etc.) are
     # inherited by bash through the env.

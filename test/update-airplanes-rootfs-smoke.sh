@@ -229,7 +229,14 @@ run_update() {
     local feed_mode="${2:-success}"
     local package_manager="${3:-}"
     local is_chroot="${4:-0}"
-    local pass_branch_env="${5:-1}"
+    # pass_feed_branch_env controls the AIRPLANES_FEED_BRANCH env var that
+    # the bridge uses to decide whether to defer to feed's release-channel
+    # resolution. AIRPLANES_UPDATE_BRANCH is always passed because the
+    # bridge's auto-detection of its own update branch is orthogonal —
+    # without it the bridge defaults to "main" and the rootfs-smoke
+    # fixture's bare repo (only carrying the rootfs-smoke ref) makes the
+    # initial clone fail regardless of feed-branch semantics.
+    local pass_feed_branch_env="${5:-1}"
     local script_path="${6:-$UPDATE_DIR/update-airplanes.sh}"
     local -a env_args
     local status
@@ -241,6 +248,7 @@ run_update() {
         "TAR1090_LOG=$TAR1090_LOG"
         "AIRPLANES_ROOT=$ROOT_DIR"
         "AIRPLANES_UPDATE_REPO=file://$UPDATE_BARE"
+        "AIRPLANES_UPDATE_BRANCH=$UPDATE_BRANCH"
         "AIRPLANES_READSB_REPO=file://$READSB_BARE"
         "AIRPLANES_READSB_BRANCH=$READSB_BRANCH"
         "AIRPLANES_FEED_REPO=$feed_repo"
@@ -248,15 +256,12 @@ run_update() {
         "AIRPLANES_TEST_IS_CHROOT=$is_chroot"
         "AIRPLANES_PACKAGE_MANAGER=$package_manager"
     )
-    if [[ "$pass_branch_env" == "1" ]]; then
-        env_args+=(
-            "AIRPLANES_UPDATE_BRANCH=$UPDATE_BRANCH"
-            "AIRPLANES_FEED_BRANCH=$FEED_BRANCH"
-        )
+    if [[ "$pass_feed_branch_env" == "1" ]]; then
+        env_args+=("AIRPLANES_FEED_BRANCH=$FEED_BRANCH")
     fi
 
     set +e
-    env -u AIRPLANES_UPDATE_BRANCH -u AIRPLANES_FEED_BRANCH "${env_args[@]}" bash "$script_path"
+    env -u AIRPLANES_FEED_BRANCH "${env_args[@]}" bash "$script_path"
     status=$?
     set -e
 
@@ -344,14 +349,14 @@ assert_success_state() {
     assert_contains "$FEED_UPDATE_LOG" "^package_manager=$expected_package_manager$"
     assert_contains "$FEED_UPDATE_LOG" '^mode=success$'
 
-    # release-channel seeded to "stable" when the bridge ran on a box
-    # that didn't already have one — that's what enables feed/update.sh
-    # to resolve to the latest semver tag instead of being pinned to the
-    # bridge's branch.
+    # release-channel — default expectation is "stable" (bridge seeds on
+    # a box that didn't already have one). Tests that pre-seed a specific
+    # value override via the 3rd arg.
+    local expected_release_channel="${3:-stable}"
     [[ -f "$ROOT_DIR/etc/airplanes/release-channel" ]] \
         || fail "missing /etc/airplanes/release-channel"
-    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "stable" ]] \
-        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want stable"
+    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "$expected_release_channel" ]] \
+        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want $expected_release_channel"
     assert_contains "$TAR1090_LOG" '^tar1090 install$'
     assert_contains "$COMMAND_LOG" '^apt-get install '
     assert_contains "$COMMAND_LOG" '^systemctl daemon-reload$'
@@ -415,17 +420,31 @@ test_raw_script_defaults_to_main_branches() {
     echo "raw script branch defaults path passed"
 }
 
+# Helper: tests that exercise the deferred-feed-branch path
+# (pass_feed_branch_env=0) need the bridge's auto-detected branch to
+# match the feed bare repo's branch. airplanes_default_branch() only
+# ever returns "main" or "dev", never the harness default
+# "rootfs-smoke", so we run the bridge from an installed-update copy
+# pinned to "dev" + matching feed bare on dev.
+prepare_deferred_path_fixture() {
+    UPDATE_BRANCH="dev"
+    FEED_BRANCH="dev"
+    prepare_common_fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" dev
+}
+
 test_release_channel_already_present_is_preserved() {
     setup_case release-channel-preserved
-    prepare_common_fixture
+    prepare_deferred_path_fixture
     mkdir -p "$ROOT_DIR/etc/airplanes"
     echo "dev" > "$ROOT_DIR/etc/airplanes/release-channel"
 
-    # pass_branch_env=0 so the bridge actually exercises the deferred
-    # path. With the env var set, feed/update.sh ignores release-channel
-    # entirely and the test wouldn't observe whether the bridge is
-    # clobbering the file.
+    # pass_feed_branch_env=0 so the bridge actually exercises the
+    # deferred path. With the env var set, feed/update.sh ignores
+    # release-channel entirely and the test wouldn't observe whether
+    # the bridge is clobbering the file.
     run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" \
         || fail "release-channel-preserved path failed"
 
     # Operator pinned dev before running the bridge; the bridge must
@@ -437,7 +456,7 @@ test_release_channel_already_present_is_preserved() {
 
 test_release_channel_empty_file_is_self_healed() {
     setup_case release-channel-empty
-    prepare_common_fixture
+    prepare_deferred_path_fixture
     mkdir -p "$ROOT_DIR/etc/airplanes"
     # Simulate a previous interrupted write — empty file present but
     # contentless. Bridge should rewrite to "stable" so feed's strict
@@ -445,11 +464,49 @@ test_release_channel_empty_file_is_self_healed() {
     : > "$ROOT_DIR/etc/airplanes/release-channel"
 
     run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" \
         || fail "release-channel-empty self-heal path failed"
 
     [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "stable" ]] \
         || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want stable (empty file should be self-healed)"
     echo "release-channel empty file self-heal passed"
+}
+
+test_release_channel_invalid_content_is_self_healed() {
+    setup_case release-channel-invalid
+    prepare_deferred_path_fixture
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    # Truncated write (`sta` instead of `stable`) or hand-typed value
+    # outside feed's strict allowlist. Bridge should overwrite it with
+    # stable so the next feed/update.sh run doesn't abort on the channel
+    # allowlist check.
+    printf 'sta' > "$ROOT_DIR/etc/airplanes/release-channel"
+
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "release-channel-invalid self-heal path failed"
+
+    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "stable" ]] \
+        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want stable"
+    echo "release-channel invalid-content self-heal passed"
+}
+
+test_release_channel_whitespace_only_is_self_healed() {
+    setup_case release-channel-whitespace
+    prepare_deferred_path_fixture
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    # Whitespace-only file (size > 0 but no usable content). The
+    # is-empty check `! -s` wouldn't catch this; the validator-based
+    # self-heal does.
+    printf '   \n\t\n' > "$ROOT_DIR/etc/airplanes/release-channel"
+
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "release-channel-whitespace self-heal path failed"
+
+    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "stable" ]] \
+        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want stable"
+    echo "release-channel whitespace-only self-heal passed"
 }
 
 test_operator_feed_branch_override_passes_through() {
@@ -470,7 +527,7 @@ test_operator_feed_branch_override_passes_through() {
 
 test_tag_present_uses_deferred_resolution() {
     setup_case tag-present-deferred
-    prepare_common_fixture
+    prepare_deferred_path_fixture
     # The dev-checkout and raw-script cases above exercise the no-tags
     # fallback. Once a vX.Y.Z tag exists on the feed remote, the
     # bridge's preflight succeeds and the deferred-resolution path
@@ -481,10 +538,39 @@ test_tag_present_uses_deferred_resolution() {
     git -C "$FEED_BARE" tag v0.1.0 "$(git -C "$FEED_BARE" rev-parse HEAD)"
 
     run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" \
         || fail "tag-present deferred-resolution path failed"
 
     assert_success_state apt ""
     echo "tag-present deferred-resolution path passed"
+}
+
+test_no_tags_with_release_channel_dev_falls_back_to_dev() {
+    setup_case no-tags-channel-dev
+    prepare_deferred_path_fixture
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    echo "dev" > "$ROOT_DIR/etc/airplanes/release-channel"
+
+    # No tags + release-channel=dev: the bridge must respect the dev
+    # channel pin in the fallback rather than blindly using its own
+    # auto-detected branch. (On a real stable image the bridge's own
+    # checkout would be on main; the harness uses dev for both, so
+    # this test still verifies "channel wins over auto-detected
+    # bridge branch" only by virtue of the channel pin being the
+    # explicit signal. The asserted branch=dev would also be the
+    # auto-detected default in this harness — for a stricter check
+    # see the no-tags fallback in test_raw_script_defaults_to_main_
+    # branches, where release-channel is absent and the assertion is
+    # "main".)
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "no-tags-channel-dev fallback path failed"
+
+    # The bridge passes AIRPLANES_FEED_BRANCH=dev explicitly, which
+    # the stub feed/update.sh logs verbatim. release-channel=dev was
+    # operator-pinned and must be preserved.
+    assert_success_state apt "dev" "dev"
+    echo "no-tags release-channel=dev fallback path passed"
 }
 
 test_bad_feed_repo_fails_before_tar1090() {
@@ -545,8 +631,11 @@ main() {
     test_raw_script_defaults_to_main_branches
     test_release_channel_already_present_is_preserved
     test_release_channel_empty_file_is_self_healed
+    test_release_channel_invalid_content_is_self_healed
+    test_release_channel_whitespace_only_is_self_healed
     test_operator_feed_branch_override_passes_through
     test_tag_present_uses_deferred_resolution
+    test_no_tags_with_release_channel_dev_falls_back_to_dev
     test_bad_feed_repo_fails_before_tar1090
     test_feed_update_failure_propagates
     test_chroot_skips_feed_update
