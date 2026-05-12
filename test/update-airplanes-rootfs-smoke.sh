@@ -305,6 +305,10 @@ assert_success_state() {
     local expected_package_manager="$1"
 
     [[ -f "$ROOT_DIR/etc/systemd/system/airplanes-first-run.service" ]] || fail "missing first-run service"
+    # The first-run script must translate /boot/airplanes-config.txt into
+    # feed.env via apl-feed import legacy-config so legacy webconfig saves
+    # propagate to the new feed daemons on next service restart.
+    assert_contains "$ROOT_DIR/usr/bin/airplanes-first-run" 'apl-feed import legacy-config /boot/airplanes-config.txt'
     [[ -f "$ROOT_DIR/usr/local/bin/create-uuid.sh" ]] || fail "missing create-uuid.sh"
     [[ -x "$ROOT_DIR/usr/bin/airplanes-feeder" ]] || fail "missing airplanes-feeder"
     [[ -x "$ROOT_DIR/usr/bin/airplanes-978" ]] || fail "missing airplanes-978"
