@@ -308,7 +308,9 @@ assert_success_state() {
     # The first-run script must translate /boot/airplanes-config.txt into
     # feed.env via apl-feed import legacy-config so legacy webconfig saves
     # propagate to the new feed daemons on next service restart.
-    assert_contains "$ROOT_DIR/usr/bin/airplanes-first-run" 'apl-feed import legacy-config /boot/airplanes-config.txt'
+    # --no-restart is required because this service is Type=oneshot and
+    # the legacy units After= it.
+    assert_contains "$ROOT_DIR/usr/bin/airplanes-first-run" 'apl-feed import legacy-config --no-restart /boot/airplanes-config.txt'
     [[ -f "$ROOT_DIR/usr/local/bin/create-uuid.sh" ]] || fail "missing create-uuid.sh"
     [[ -x "$ROOT_DIR/usr/bin/airplanes-feeder" ]] || fail "missing airplanes-feeder"
     [[ -x "$ROOT_DIR/usr/bin/airplanes-978" ]] || fail "missing airplanes-978"

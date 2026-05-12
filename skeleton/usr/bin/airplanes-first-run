@@ -43,11 +43,19 @@ if [ -f "/boot/airplanes-config.txt" ]; then
     # to the running services on the next restart. Idempotent (no-op when the
     # legacy values already match feed.env).
     #
+    # `--no-restart`: this service is Type=oneshot and the legacy services
+    # (airplanes-feed, airplanes-mlat, dump978-fa, airplanes-978) declare
+    # After=airplanes-first-run.service, so any systemctl restart issued
+    # from inside the script would deadlock against the units waiting for
+    # this script to finish. Restart ownership lives with systemd (boot
+    # path) or with airplanes-webconfig/helpers/restart-services.sh (save
+    # path) — both happen after this script exits.
+    #
     # apl-feed is shipped by feed/update.sh and only present after the legacy
     # update bridge has fully run, so gate on command -v — pure-legacy boxes
     # (no bridge yet) skip silently.
     if command -v apl-feed >/dev/null 2>&1; then
-        if ! apl-feed import legacy-config /boot/airplanes-config.txt; then
+        if ! apl-feed import legacy-config --no-restart /boot/airplanes-config.txt; then
             echo "airplanes-first-run: apl-feed import legacy-config failed; feed.env may be stale" >&2
         fi
     fi

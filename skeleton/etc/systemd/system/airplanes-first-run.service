@@ -5,12 +5,17 @@ After=local-fs.target
 Before=ssh.service
 
 [Service]
-Type=simple
+# Type=oneshot so units with After=airplanes-first-run.service (readsb,
+# airplanes-feed, airplanes-mlat, dump978-fa, airplanes-978) wait for the
+# script to finish before they start. With the previous Type=simple they
+# could start as soon as ExecStart began, racing the script's apl-feed
+# import legacy-config call and sourcing a stale feed.env.
+Type=oneshot
+RemainAfterExit=yes
 ExecStart=/usr/bin/airplanes-first-run
 WorkingDirectory=/run
 StandardOutput=inherit
 StandardError=inherit
-Restart=no
 User=root
 
 [Install]
