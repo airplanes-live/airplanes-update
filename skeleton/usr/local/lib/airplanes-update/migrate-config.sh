@@ -95,16 +95,30 @@ extract_key() {
 
     case "$raw" in
         '"'*)
-            # Double-quoted: handle \\, \", \$, \` escapes; reject if
-            # closing quote is missing.
-            local result="" i len=${#raw} escaped=0 closed=0 c
+            # Double-quoted: bash double-quote grammar only treats `\` as
+            # an escape when followed by `\`, `"`, `$`, or backtick. For
+            # any other character the backslash is preserved literally
+            # (so `USER="a\xb"` sources to the 4-byte value a\xb). Reject
+            # if the closing quote is missing. Note: this parser is
+            # single-line; line-continuation (`\` + newline) is not
+            # supported — multi-line values are out of scope for the
+            # boot-config file format.
+            local result="" i len=${#raw} escaped=0 closed=0 c next
             for (( i=1; i<len; i++ )); do
                 c="${raw:$i:1}"
                 if (( escaped )); then
                     result+="$c"
                     escaped=0
                 elif [[ "$c" == '\' ]]; then
-                    escaped=1
+                    next="${raw:$((i+1)):1}"
+                    case "$next" in
+                        '\'|'"'|'$'|'`')
+                            escaped=1
+                            ;;
+                        *)
+                            result+='\'
+                            ;;
+                    esac
                 elif [[ "$c" == '"' ]]; then
                     closed=1
                     break
