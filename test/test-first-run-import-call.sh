@@ -21,6 +21,7 @@ trap 'rm -rf "$WORK"' EXIT
 ROOT="$WORK/root"
 STUB="$WORK/bin"
 APL_FEED_LOG="$WORK/apl-feed.argv"
+SYSTEMCTL_LOG="$WORK/systemctl.argv"
 mkdir -p "$ROOT/boot" "$ROOT/usr/local/bin" "$STUB"
 
 # Stub apl-feed: log one invocation per line as tab-joined argv tokens.
@@ -41,11 +42,27 @@ exit 0
 APL_FEED
 chmod +x "$STUB/apl-feed"
 
-# Silence everything else. systemctl gets called with is-enabled / is-active
-# / enable / disable / stop / start — all return success in this test.
-cat > "$STUB/systemctl" <<'SYSTEMCTL'
+# Log systemctl invocations as tab-joined argv so the assertion below can
+# verify --no-block reaches start calls (After=airplanes-first-run.service
+# units would deadlock on a synchronous start while this Type=oneshot is
+# still running). is-enabled / is-active probes return non-zero so the
+# script exercises the enable + start arms rather than the early-skip
+# arms; everything else returns 0.
+cat > "$STUB/systemctl" <<SYSTEMCTL
 #!/usr/bin/env bash
-exit 0
+printf '%s' "\$1" >> "$SYSTEMCTL_LOG"
+shift
+for arg in "\$@"; do
+    printf '\t%s' "\$arg" >> "$SYSTEMCTL_LOG"
+done
+printf '\n' >> "$SYSTEMCTL_LOG"
+sub="\$(awk -F'\t' '{print \$1; exit}' "$SYSTEMCTL_LOG" | tail -n 1)"
+# The first column of the last logged line is the subcommand.
+last="\$(tail -n 1 "$SYSTEMCTL_LOG" | cut -f1)"
+case "\$last" in
+    is-enabled|is-active) exit 1 ;;
+    *) exit 0 ;;
+esac
 SYSTEMCTL
 chmod +x "$STUB/systemctl"
 
@@ -97,6 +114,30 @@ if ! grep -Fxq -- "$expected_line" "$APL_FEED_LOG"; then
     echo "  expected: $expected_line" >&2
     echo "  actual log:" >&2
     cat "$APL_FEED_LOG" >&2
+    exit 1
+fi
+
+# Every `start` call (the enable arm of services-handle) must carry
+# --no-block. A bare `systemctl start <unit>` from inside this Type=
+# oneshot script deadlocks against any unit that declares After=
+# airplanes-first-run.service.
+if [[ ! -s "$SYSTEMCTL_LOG" ]]; then
+    echo "FAIL: systemctl was not invoked" >&2
+    exit 1
+fi
+bare_starts="$(awk -F'\t' '$1 == "start" { for (i=2; i<=NF; i++) if ($i == "--no-block") next; print }' "$SYSTEMCTL_LOG")"
+if [[ -n "$bare_starts" ]]; then
+    echo "FAIL: systemctl start without --no-block:" >&2
+    printf '  %s\n' "$bare_starts" >&2
+    exit 1
+fi
+# Sanity: at least one start fired in the enable arm. fixture has DUMP1090=yes
+# and GRAPHS1090=yes so airplanes-mlat / graphs1090 / autogain1090.timer
+# should all have been issued.
+start_count="$(awk -F'\t' '$1 == "start" { n++ } END { print n+0 }' "$SYSTEMCTL_LOG")"
+if (( start_count == 0 )); then
+    echo "FAIL: no systemctl start calls observed (stub or fixture broken)" >&2
+    cat "$SYSTEMCTL_LOG" >&2
     exit 1
 fi
 
