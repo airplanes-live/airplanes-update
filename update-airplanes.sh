@@ -23,7 +23,21 @@ UPDATE_BRANCH="${AIRPLANES_UPDATE_BRANCH:-$DEFAULT_BRANCH}"
 READSB_REPO="${AIRPLANES_READSB_REPO:-https://github.com/airplanes-live/readsb.git}"
 READSB_BRANCH="${AIRPLANES_READSB_BRANCH:-}"
 FEED_REPO="${AIRPLANES_FEED_REPO:-https://github.com/airplanes-live/feed.git}"
+# FEED_BRANCH is the bootstrap clone ref for the bridge's own copy of
+# feed/ (just enough to get feed/update.sh on disk). It is NOT what
+# ends up installed — feed/update.sh self-replaces and re-execs from
+# the resolved tag (or the AIRPLANES_FEED_BRANCH override) once it is
+# running. Two operator-facing edge cases:
+#   - AIRPLANES_FEED_BRANCH=stable is feed's sentinel for "resolve via
+#     release-channel"; no real branch is named that. Fall through to
+#     DEFAULT_BRANCH for the bootstrap clone, then still pass the
+#     sentinel to feed via AIRPLANES_FEED_BRANCH below.
+#   - empty / unset: auto-detect from the bridge's own checkout
+#     (main / dev).
 FEED_BRANCH="${AIRPLANES_FEED_BRANCH:-$DEFAULT_BRANCH}"
+if [[ "$FEED_BRANCH" == "stable" ]]; then
+    FEED_BRANCH="$DEFAULT_BRANCH"
+fi
 
 airplanes_path() {
     local path="$1"
@@ -124,18 +138,20 @@ unset migrator config_file
 if ! ischroot; then
     release_channel_file="$(airplanes_path /etc/airplanes/release-channel)"
     release_channel_existing=""
+    release_channel_raw=""
     if [[ -r "$release_channel_file" ]]; then
-        release_channel_existing="$(head -n1 "$release_channel_file" 2>/dev/null | tr -d '[:space:]')"
+        release_channel_raw="$(head -n1 "$release_channel_file" 2>/dev/null || true)"
+        release_channel_existing="$(printf '%s' "$release_channel_raw" | tr -d '[:space:]')"
     fi
     case "$release_channel_existing" in
         stable|main|dev)
             # Valid value present — leave it alone (operator pin, or
             # previous seed).
             ;;
-        *)
-            # Empty, whitespace-only, or invalid value (e.g. truncated
-            # write like `sta`, or a hand-edit feed's strict allowlist
-            # would reject). Self-heal to stable via temp + rename.
+        '')
+            # File missing, empty, or whitespace-only (e.g. from a
+            # previous interrupted write). Self-heal to stable via temp
+            # + rename so feed/update.sh's strict allowlist accepts it.
             mkdir -p "$(dirname "$release_channel_file")"
             release_channel_tmp="$(mktemp "${release_channel_file}.XXXXXX")"
             chmod 0644 "$release_channel_tmp"
@@ -144,8 +160,18 @@ if ! ischroot; then
             release_channel_existing="stable"
             unset release_channel_tmp
             ;;
+        *)
+            # Non-empty content that doesn't match the allowlist — e.g.
+            # an operator hand-edit typo like `deev`. Leave the file
+            # alone: silently rewriting to stable would mask the typo,
+            # whereas feed/update.sh's release-channel check refuses
+            # the value loudly with a clear "expected one of: stable,
+            # dev, main" error. Surfacing the operator's mistake beats
+            # second-guessing it.
+            echo "warning: $release_channel_file contains '$release_channel_raw' which is not in the {stable, main, dev} allowlist; feed/update.sh will refuse this on the next run." >&2
+            ;;
     esac
-    unset release_channel_file
+    unset release_channel_file release_channel_raw
 fi
 
 # remove strange dhcpcd wait.conf in case it's there
@@ -248,9 +274,13 @@ else
         # outcomes:
         #   - query succeeds + has semver tag → defer to feed
         #   - query succeeds + no semver tag → fall back to a concrete
-        #     branch chosen from the (validated) release-channel:
-        #       dev          → dev
-        #       stable/main  → bridge's own FEED_BRANCH
+        #     branch chosen by the (validated) release-channel:
+        #       dev                          → dev
+        #       stable / main / empty / unset → main
+        #     The channel is the operator's intent; the bridge's own
+        #     auto-detected checkout branch is incidental and must not
+        #     leak through to the installed feed. (A dev-checkout bridge
+        #     run on a stable-channel feeder still pins feed to main.)
         #   - query fails (network/DNS/TLS) → don't fall back; let feed/
         #     update.sh surface its own structured network error rather
         #     than mask the failure by silently pinning a branch.
@@ -258,16 +288,16 @@ else
         feed_tag_refs=""
         if feed_tag_refs="$(git ls-remote --tags --refs "$FEED_REPO" 2>/dev/null)"; then
             if ! grep -Eq 'refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' <<<"$feed_tag_refs"; then
+                fallback_branch=""
                 case "${release_channel_existing:-stable}" in
-                    dev)
-                        echo "no semver tags on $FEED_REPO yet; release-channel=dev, pinning AIRPLANES_FEED_BRANCH=dev as a transitional measure" >&2
-                        feed_env_args+=("AIRPLANES_FEED_BRANCH=dev")
-                        ;;
-                    *)
-                        echo "no semver tags on $FEED_REPO yet; pinning AIRPLANES_FEED_BRANCH=$FEED_BRANCH as a transitional measure" >&2
-                        feed_env_args+=("AIRPLANES_FEED_BRANCH=$FEED_BRANCH")
-                        ;;
+                    dev)              fallback_branch="dev" ;;
+                    stable|main|"")   fallback_branch="main" ;;
                 esac
+                if [[ -n "$fallback_branch" ]]; then
+                    echo "no semver tags on $FEED_REPO yet; pinning AIRPLANES_FEED_BRANCH=$fallback_branch (channel=${release_channel_existing:-stable}) as a transitional measure" >&2
+                    feed_env_args+=("AIRPLANES_FEED_BRANCH=$fallback_branch")
+                fi
+                unset fallback_branch
             fi
         else
             echo "warning: could not query $FEED_REPO for tags; deferring to feed/update.sh's network-error handling" >&2

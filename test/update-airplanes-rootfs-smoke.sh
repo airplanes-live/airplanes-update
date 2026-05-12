@@ -391,17 +391,25 @@ test_dev_checkout_defaults_to_dev_branches() {
     FEED_BRANCH="dev"
     prepare_common_fixture
     make_installed_update_checkout "$CASE_DIR/installed-update" dev
+    # Pre-seed release-channel=dev so the tightened fallback maps the
+    # channel to feed branch dev. Without this, the bridge would
+    # self-heal the missing file to stable, and the channel→branch map
+    # would then pin feed to main — decoupled from the bridge's own
+    # checkout branch (see round-3 self-heal tightening).
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    printf 'dev\n' > "$ROOT_DIR/etc/airplanes/release-channel"
 
     run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/installed-update/update-airplanes.sh" \
         || fail "dev checkout default path failed"
     # Operator did not pin AIRPLANES_FEED_BRANCH. The feed bare repo
     # has no vX.Y.Z tags yet, so the bridge's preflight detects that
-    # and falls back to pinning its own auto-detected branch (dev),
-    # which the stub feed/update.sh logs verbatim. Once v0.1.0 is cut
-    # on the real feed remote, this same harness shape would flip to
-    # the empty-branch deferred path (see test_tag_present_uses_
-    # deferred_resolution below for that scenario explicitly).
-    assert_success_state apt "$FEED_BRANCH"
+    # and falls back to the channel→branch map: release-channel=dev
+    # maps to feed branch dev. The stub feed/update.sh logs the pinned
+    # branch verbatim. Once v0.1.0 is cut on the real feed remote, this
+    # same harness shape would flip to the empty-branch deferred path
+    # (see test_tag_present_uses_deferred_resolution below for that
+    # scenario explicitly).
+    assert_success_state apt "$FEED_BRANCH" dev
     echo "dev checkout branch defaults path passed"
 }
 
@@ -435,7 +443,11 @@ prepare_deferred_path_fixture() {
 
 test_release_channel_already_present_is_preserved() {
     setup_case release-channel-preserved
-    prepare_deferred_path_fixture
+    UPDATE_BRANCH="main"
+    FEED_BRANCH="main"
+    prepare_common_fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" main
+    git -C "$FEED_BARE" branch dev main
     mkdir -p "$ROOT_DIR/etc/airplanes"
     echo "dev" > "$ROOT_DIR/etc/airplanes/release-channel"
 
@@ -472,23 +484,28 @@ test_release_channel_empty_file_is_self_healed() {
     echo "release-channel empty file self-heal passed"
 }
 
-test_release_channel_invalid_content_is_self_healed() {
+test_release_channel_invalid_content_is_preserved() {
     setup_case release-channel-invalid
     prepare_deferred_path_fixture
     mkdir -p "$ROOT_DIR/etc/airplanes"
-    # Truncated write (`sta` instead of `stable`) or hand-typed value
-    # outside feed's strict allowlist. Bridge should overwrite it with
-    # stable so the next feed/update.sh run doesn't abort on the channel
-    # allowlist check.
+    # Hand-typed value outside feed's strict allowlist (e.g. `sta`,
+    # `deev`). Bridge MUST leave it alone — feed/update.sh's allowlist
+    # check will reject it loudly on the next run. Silently rewriting to
+    # stable would mask the operator's typo.
     printf 'sta' > "$ROOT_DIR/etc/airplanes/release-channel"
 
+    local stderr_log="$CASE_DIR/stderr.log"
     run_update "file://$FEED_BARE" success "" 0 0 \
-        "$CASE_DIR/installed-update/update-airplanes.sh" \
-        || fail "release-channel-invalid self-heal path failed"
+        "$CASE_DIR/installed-update/update-airplanes.sh" 2> "$stderr_log" \
+        || { cat "$stderr_log" >&2; fail "release-channel-invalid path failed"; }
 
-    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "stable" ]] \
-        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want stable"
-    echo "release-channel invalid-content self-heal passed"
+    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "sta" ]] \
+        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want sta (must not rewrite invalid content)"
+    grep -q "release-channel contains 'sta'" "$stderr_log" \
+        || { cat "$stderr_log" >&2; fail "bridge did not warn about invalid release-channel value"; }
+    grep -q "not in the {stable, main, dev} allowlist" "$stderr_log" \
+        || { cat "$stderr_log" >&2; fail "bridge warning missing allowlist hint"; }
+    echo "release-channel invalid-content preservation passed"
 }
 
 test_release_channel_whitespace_only_is_self_healed() {
@@ -547,30 +564,153 @@ test_tag_present_uses_deferred_resolution() {
 
 test_no_tags_with_release_channel_dev_falls_back_to_dev() {
     setup_case no-tags-channel-dev
-    prepare_deferred_path_fixture
+    # Bridge on main, feed bare carrying both main and a separately-
+    # named dev branch. release-channel=dev should pin AIRPLANES_FEED_
+    # BRANCH=dev despite the bridge's own auto-detected default being
+    # main — proving the channel wins over the bridge's checkout state.
+    UPDATE_BRANCH="main"
+    FEED_BRANCH="main"
+    prepare_common_fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" main
+    # Add a dev ref to the feed bare so the bridge could theoretically
+    # pin it. The harness only seeds one branch by default; here we
+    # need two so the channel choice is unambiguous.
+    git -C "$FEED_BARE" branch dev main
+
     mkdir -p "$ROOT_DIR/etc/airplanes"
     echo "dev" > "$ROOT_DIR/etc/airplanes/release-channel"
 
-    # No tags + release-channel=dev: the bridge must respect the dev
-    # channel pin in the fallback rather than blindly using its own
-    # auto-detected branch. (On a real stable image the bridge's own
-    # checkout would be on main; the harness uses dev for both, so
-    # this test still verifies "channel wins over auto-detected
-    # bridge branch" only by virtue of the channel pin being the
-    # explicit signal. The asserted branch=dev would also be the
-    # auto-detected default in this harness — for a stricter check
-    # see the no-tags fallback in test_raw_script_defaults_to_main_
-    # branches, where release-channel is absent and the assertion is
-    # "main".)
     run_update "file://$FEED_BARE" success "" 0 0 \
         "$CASE_DIR/installed-update/update-airplanes.sh" \
         || fail "no-tags-channel-dev fallback path failed"
 
-    # The bridge passes AIRPLANES_FEED_BRANCH=dev explicitly, which
-    # the stub feed/update.sh logs verbatim. release-channel=dev was
+    # The bridge auto-detected main from its installed-update checkout;
+    # the channel pin (dev) wins in the fallback selection and the
+    # stub feed/update.sh logs branch=dev. release-channel=dev was
     # operator-pinned and must be preserved.
     assert_success_state apt "dev" "dev"
-    echo "no-tags release-channel=dev fallback path passed"
+    echo "no-tags release-channel=dev (channel wins over bridge default) passed"
+}
+
+test_no_tags_with_release_channel_stable_falls_back_to_main() {
+    setup_case no-tags-channel-stable
+    # Symmetric to the dev case: a dev-checkout bridge running on a
+    # stable-channel feeder must NOT silently flip the operator to dev.
+    # Channel rules.
+    UPDATE_BRANCH="dev"
+    FEED_BRANCH="dev"
+    prepare_common_fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" dev
+    # Add a main ref to the feed bare so the channel-driven mapping
+    # has somewhere to land.
+    git -C "$FEED_BARE" branch main dev
+
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    echo "stable" > "$ROOT_DIR/etc/airplanes/release-channel"
+
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "no-tags-channel-stable fallback path failed"
+
+    # release-channel=stable + no tags → fallback pins
+    # AIRPLANES_FEED_BRANCH=main regardless of the bridge's dev
+    # checkout. (The bridge's auto-detected default would have been
+    # dev; the channel beats it.)
+    assert_success_state apt "main" "stable"
+    echo "no-tags release-channel=stable (channel wins over bridge default) passed"
+}
+
+test_operator_stable_sentinel_bootstraps_correctly() {
+    setup_case operator-stable-sentinel
+    UPDATE_BRANCH="main"
+    FEED_BRANCH="main"
+    prepare_common_fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" main
+    # Tag the feed bare so feed/update.sh has something to resolve.
+    git -C "$FEED_BARE" tag v0.1.0 "$(git -C "$FEED_BARE" rev-parse main)"
+
+    # Operator passes AIRPLANES_FEED_BRANCH=stable expecting feed's
+    # release-channel sentinel. The bridge must NOT try to clone feed
+    # at a branch literally named "stable" (no such branch exists) —
+    # it has to bootstrap from DEFAULT_BRANCH (main here) and still
+    # pass the sentinel through to feed/update.sh.
+    PATH="$STUB_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        COMMAND_LOG="$COMMAND_LOG" \
+        FEED_UPDATE_LOG="$FEED_UPDATE_LOG" \
+        TAR1090_LOG="$TAR1090_LOG" \
+        AIRPLANES_ROOT="$ROOT_DIR" \
+        AIRPLANES_UPDATE_REPO="file://$UPDATE_BARE" \
+        AIRPLANES_UPDATE_BRANCH="$UPDATE_BRANCH" \
+        AIRPLANES_READSB_REPO="file://$READSB_BARE" \
+        AIRPLANES_READSB_BRANCH="$READSB_BRANCH" \
+        AIRPLANES_FEED_REPO="file://$FEED_BARE" \
+        AIRPLANES_FEED_BRANCH="stable" \
+        AIRPLANES_TEST_FEED_UPDATE_MODE=success \
+        AIRPLANES_TEST_IS_CHROOT=0 \
+        AIRPLANES_PACKAGE_MANAGER=apt \
+        bash "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "operator-stable-sentinel path failed"
+
+    # The bridge cloned feed from main (DEFAULT_BRANCH on a main
+    # checkout) and passed AIRPLANES_FEED_BRANCH=stable through to
+    # feed unchanged.
+    assert_contains "$FEED_UPDATE_LOG" '^branch=stable$'
+    echo "operator AIRPLANES_FEED_BRANCH=stable sentinel passed"
+}
+
+test_no_tags_with_release_channel_stable_falls_back_to_main() {
+    setup_case no-tags-channel-stable
+    UPDATE_BRANCH="dev"
+    FEED_BRANCH="dev"
+    prepare_common_fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" dev
+    git -C "$FEED_BARE" branch main dev
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    echo "stable" > "$ROOT_DIR/etc/airplanes/release-channel"
+
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "no-tags-channel-stable fallback path failed"
+
+    # Bridge auto-detected dev from its installed-update checkout; the
+    # channel pin (stable) wins in the fallback selection so the stub
+    # feed/update.sh logs branch=main.
+    assert_success_state apt "main" "stable"
+    echo "no-tags release-channel=stable (channel wins over bridge default) passed"
+}
+
+test_operator_stable_sentinel_bootstraps_correctly() {
+    setup_case operator-stable-sentinel
+    UPDATE_BRANCH="main"
+    FEED_BRANCH="main"
+    prepare_common_fixture
+    make_installed_update_checkout "$CASE_DIR/installed-update" main
+    git -C "$FEED_BARE" tag v0.1.0 "$(git -C "$FEED_BARE" rev-parse main)"
+
+    # Operator passes AIRPLANES_FEED_BRANCH=stable expecting feed's
+    # release-channel sentinel. The bridge must NOT try to clone feed
+    # at a branch literally named "stable" (no such branch exists) -
+    # it has to bootstrap from DEFAULT_BRANCH (main here) and still
+    # pass the sentinel through to feed/update.sh.
+    PATH="$STUB_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        COMMAND_LOG="$COMMAND_LOG" \
+        FEED_UPDATE_LOG="$FEED_UPDATE_LOG" \
+        TAR1090_LOG="$TAR1090_LOG" \
+        AIRPLANES_ROOT="$ROOT_DIR" \
+        AIRPLANES_UPDATE_REPO="file://$UPDATE_BARE" \
+        AIRPLANES_UPDATE_BRANCH="$UPDATE_BRANCH" \
+        AIRPLANES_READSB_REPO="file://$READSB_BARE" \
+        AIRPLANES_READSB_BRANCH="$READSB_BRANCH" \
+        AIRPLANES_FEED_REPO="file://$FEED_BARE" \
+        AIRPLANES_FEED_BRANCH="stable" \
+        AIRPLANES_TEST_FEED_UPDATE_MODE=success \
+        AIRPLANES_TEST_IS_CHROOT=0 \
+        AIRPLANES_PACKAGE_MANAGER=apt \
+        bash "$CASE_DIR/installed-update/update-airplanes.sh" \
+        || fail "operator-stable-sentinel path failed"
+
+    assert_contains "$FEED_UPDATE_LOG" '^branch=stable$'
+    echo "operator AIRPLANES_FEED_BRANCH=stable sentinel passed"
 }
 
 test_bad_feed_repo_fails_before_tar1090() {
@@ -631,11 +771,13 @@ main() {
     test_raw_script_defaults_to_main_branches
     test_release_channel_already_present_is_preserved
     test_release_channel_empty_file_is_self_healed
-    test_release_channel_invalid_content_is_self_healed
+    test_release_channel_invalid_content_is_preserved
     test_release_channel_whitespace_only_is_self_healed
     test_operator_feed_branch_override_passes_through
     test_tag_present_uses_deferred_resolution
     test_no_tags_with_release_channel_dev_falls_back_to_dev
+    test_no_tags_with_release_channel_stable_falls_back_to_main
+    test_operator_stable_sentinel_bootstraps_correctly
     test_bad_feed_repo_fails_before_tar1090
     test_feed_update_failure_propagates
     test_chroot_skips_feed_update
