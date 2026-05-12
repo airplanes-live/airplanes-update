@@ -389,11 +389,14 @@ test_dev_checkout_defaults_to_dev_branches() {
 
     run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/installed-update/update-airplanes.sh" \
         || fail "dev checkout default path failed"
-    # Operator did not pin AIRPLANES_FEED_BRANCH; the bridge uses dev for
-    # its own initial clone of feed/ but doesn't pass that through to
-    # update.sh — feed resolves via release-channel instead. Empty branch
-    # in the feed-update log is the expected signal.
-    assert_success_state apt ""
+    # Operator did not pin AIRPLANES_FEED_BRANCH. The feed bare repo
+    # has no vX.Y.Z tags yet, so the bridge's preflight detects that
+    # and falls back to pinning its own auto-detected branch (dev),
+    # which the stub feed/update.sh logs verbatim. Once v0.1.0 is cut
+    # on the real feed remote, this same harness shape would flip to
+    # the empty-branch deferred path (see test_tag_present_uses_
+    # deferred_resolution below for that scenario explicitly).
+    assert_success_state apt "$FEED_BRANCH"
     echo "dev checkout branch defaults path passed"
 }
 
@@ -406,10 +409,9 @@ test_raw_script_defaults_to_main_branches() {
 
     run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/raw-update/update-airplanes.sh" \
         || fail "raw script default path failed"
-    # Same as the dev-checkout case: no operator AIRPLANES_FEED_BRANCH,
-    # so the bridge does not pass it through. feed resolves via the
-    # newly-seeded release-channel=stable.
-    assert_success_state apt ""
+    # Same as the dev-checkout case but auto-detects main. No tags on
+    # the feed bare repo so the bridge's preflight fallback fires.
+    assert_success_state apt "$FEED_BRANCH"
     echo "raw script branch defaults path passed"
 }
 
@@ -419,7 +421,12 @@ test_release_channel_already_present_is_preserved() {
     mkdir -p "$ROOT_DIR/etc/airplanes"
     echo "dev" > "$ROOT_DIR/etc/airplanes/release-channel"
 
-    run_update || fail "release-channel-preserved path failed"
+    # pass_branch_env=0 so the bridge actually exercises the deferred
+    # path. With the env var set, feed/update.sh ignores release-channel
+    # entirely and the test wouldn't observe whether the bridge is
+    # clobbering the file.
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        || fail "release-channel-preserved path failed"
 
     # Operator pinned dev before running the bridge; the bridge must
     # NOT clobber that with stable.
@@ -428,16 +435,56 @@ test_release_channel_already_present_is_preserved() {
     echo "release-channel preserved path passed"
 }
 
+test_release_channel_empty_file_is_self_healed() {
+    setup_case release-channel-empty
+    prepare_common_fixture
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    # Simulate a previous interrupted write — empty file present but
+    # contentless. Bridge should rewrite to "stable" so feed's strict
+    # allowlist doesn't reject it.
+    : > "$ROOT_DIR/etc/airplanes/release-channel"
+
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        || fail "release-channel-empty self-heal path failed"
+
+    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "stable" ]] \
+        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want stable (empty file should be self-healed)"
+    echo "release-channel empty file self-heal passed"
+}
+
 test_operator_feed_branch_override_passes_through() {
     setup_case operator-feed-branch-override
+    FEED_BRANCH="v9.9.9-operator-override"
     prepare_common_fixture
 
-    # Operator sets AIRPLANES_FEED_BRANCH explicitly (testing/recovery).
-    # The bridge must pass that through to feed/update.sh, overriding
-    # the release-channel resolution that would otherwise apply.
+    # Operator sets AIRPLANES_FEED_BRANCH to a distinct value that the
+    # harness wouldn't otherwise produce. The bridge must pass that
+    # value through verbatim, overriding the release-channel resolution
+    # that would otherwise apply. A distinct value rules out the test
+    # accidentally passing because of the harness's own env-var
+    # injection.
     run_update || fail "operator override path failed"
-    assert_success_state apt "$FEED_BRANCH"
+    assert_success_state apt "v9.9.9-operator-override"
     echo "operator feed-branch override path passed"
+}
+
+test_tag_present_uses_deferred_resolution() {
+    setup_case tag-present-deferred
+    prepare_common_fixture
+    # The dev-checkout and raw-script cases above exercise the no-tags
+    # fallback. Once a vX.Y.Z tag exists on the feed remote, the
+    # bridge's preflight succeeds and the deferred-resolution path
+    # takes over: no AIRPLANES_FEED_BRANCH is passed, and the stub
+    # feed/update.sh logs branch=empty. The actual tag → ref
+    # resolution lives in feed/update.sh (not exercised here — this
+    # test only proves the bridge stops pinning a branch).
+    git -C "$FEED_BARE" tag v0.1.0 "$(git -C "$FEED_BARE" rev-parse HEAD)"
+
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        || fail "tag-present deferred-resolution path failed"
+
+    assert_success_state apt ""
+    echo "tag-present deferred-resolution path passed"
 }
 
 test_bad_feed_repo_fails_before_tar1090() {
@@ -476,6 +523,11 @@ test_chroot_skips_feed_update() {
     [[ ! -f "$ROOT_DIR/usr/local/share/airplanes/feed-update-marker" ]] || fail "feed update marker exists in chroot"
     [[ ! -f "$ROOT_DIR/boot/airplanes-version-decoder" ]] || fail "decoder version was written in chroot"
     [[ ! -e "$ROOT_DIR/tmp/update-airplanes" ]] || fail "temporary updater directory was not cleaned after chroot exit"
+    # Release-channel seed must NOT run in chroot — image-build flows
+    # have their own logic for that file (image stage 06 writes it from
+    # the channel config) and a chroot bridge run shouldn't second-guess.
+    [[ ! -e "$ROOT_DIR/etc/airplanes/release-channel" ]] \
+        || fail "release-channel was seeded in chroot: $(cat "$ROOT_DIR/etc/airplanes/release-channel")"
     assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^LATITUDE=0.00000$'
     assert_contains "$ROOT_DIR/boot/airplanes-config.txt" '^GRAPHS1090=yes$'
     assert_contains "$TAR1090_LOG" '^tar1090 install$'
@@ -492,7 +544,9 @@ main() {
     test_dev_checkout_defaults_to_dev_branches
     test_raw_script_defaults_to_main_branches
     test_release_channel_already_present_is_preserved
+    test_release_channel_empty_file_is_self_healed
     test_operator_feed_branch_override_passes_through
+    test_tag_present_uses_deferred_resolution
     test_bad_feed_repo_fails_before_tar1090
     test_feed_update_failure_propagates
     test_chroot_skips_feed_update
