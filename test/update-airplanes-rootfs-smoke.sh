@@ -439,6 +439,12 @@ prepare_deferred_path_fixture() {
     FEED_BRANCH="dev"
     prepare_common_fixture
     make_installed_update_checkout "$CASE_DIR/installed-update" dev
+    # Round-3 tightening makes the bridge bootstrap-clone branch
+    # channel-driven (release-channel=stable → bootstrap-main). The
+    # release-channel deferred-path tests rely on stable being the
+    # self-heal default, so the fixture has to expose a main branch on
+    # the feed bare for that bootstrap clone to succeed.
+    git -C "$FEED_BARE" branch main dev
 }
 
 test_release_channel_already_present_is_preserved() {
@@ -505,6 +511,13 @@ test_release_channel_invalid_content_is_preserved() {
         || { cat "$stderr_log" >&2; fail "bridge did not warn about invalid release-channel value"; }
     grep -q "not in the {stable, main, dev} allowlist" "$stderr_log" \
         || { cat "$stderr_log" >&2; fail "bridge warning missing allowlist hint"; }
+    # Invalid content must NOT silently inject AIRPLANES_FEED_BRANCH into
+    # the feed/update.sh invocation — otherwise the typo is masked by
+    # a fallback rather than surfaced at feed's strict allowlist check.
+    # The no-tags preflight's case statement has no default arm for
+    # invalid channels, so $fallback_branch stays empty and no
+    # AIRPLANES_FEED_BRANCH is appended to feed_env_args.
+    assert_contains "$FEED_UPDATE_LOG" '^branch=$'
     echo "release-channel invalid-content preservation passed"
 }
 
@@ -658,40 +671,17 @@ test_operator_stable_sentinel_bootstraps_correctly() {
     echo "operator AIRPLANES_FEED_BRANCH=stable sentinel passed"
 }
 
-test_no_tags_with_release_channel_stable_falls_back_to_main() {
-    setup_case no-tags-channel-stable
-    UPDATE_BRANCH="dev"
-    FEED_BRANCH="dev"
-    prepare_common_fixture
-    make_installed_update_checkout "$CASE_DIR/installed-update" dev
-    git -C "$FEED_BARE" branch main dev
-    mkdir -p "$ROOT_DIR/etc/airplanes"
-    echo "stable" > "$ROOT_DIR/etc/airplanes/release-channel"
-
-    run_update "file://$FEED_BARE" success "" 0 0 \
-        "$CASE_DIR/installed-update/update-airplanes.sh" \
-        || fail "no-tags-channel-stable fallback path failed"
-
-    # Bridge auto-detected dev from its installed-update checkout; the
-    # channel pin (stable) wins in the fallback selection so the stub
-    # feed/update.sh logs branch=main.
-    assert_success_state apt "main" "stable"
-    echo "no-tags release-channel=stable (channel wins over bridge default) passed"
-}
-
-test_operator_stable_sentinel_bootstraps_correctly() {
-    setup_case operator-stable-sentinel
+test_operator_stable_sentinel_with_no_tags_passes_through() {
+    setup_case operator-stable-sentinel-no-tags
     UPDATE_BRANCH="main"
     FEED_BRANCH="main"
     prepare_common_fixture
     make_installed_update_checkout "$CASE_DIR/installed-update" main
-    git -C "$FEED_BARE" tag v0.1.0 "$(git -C "$FEED_BARE" rev-parse main)"
-
-    # Operator passes AIRPLANES_FEED_BRANCH=stable expecting feed's
-    # release-channel sentinel. The bridge must NOT try to clone feed
-    # at a branch literally named "stable" (no such branch exists) -
-    # it has to bootstrap from DEFAULT_BRANCH (main here) and still
-    # pass the sentinel through to feed/update.sh.
+    # No semver tag in the feed bare. Operator pins AIRPLANES_FEED_BRANCH
+    # =stable anyway. The bridge bootstraps from main (channel-driven) and
+    # passes the sentinel through unchanged — letting feed/update.sh
+    # surface its own "no stable tag yet" error rather than the bridge
+    # second-guessing the operator's explicit override.
     PATH="$STUB_DIR:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         COMMAND_LOG="$COMMAND_LOG" \
         FEED_UPDATE_LOG="$FEED_UPDATE_LOG" \
@@ -707,10 +697,36 @@ test_operator_stable_sentinel_bootstraps_correctly() {
         AIRPLANES_TEST_IS_CHROOT=0 \
         AIRPLANES_PACKAGE_MANAGER=apt \
         bash "$CASE_DIR/installed-update/update-airplanes.sh" \
-        || fail "operator-stable-sentinel path failed"
+        || fail "operator-stable-sentinel-no-tags path failed"
 
+    # Sentinel was passed through verbatim (no bridge intercept of the
+    # explicit operator override, even with no tags present).
     assert_contains "$FEED_UPDATE_LOG" '^branch=stable$'
-    echo "operator AIRPLANES_FEED_BRANCH=stable sentinel passed"
+    echo "operator AIRPLANES_FEED_BRANCH=stable sentinel + no tags pass-through passed"
+}
+
+test_release_channel_with_internal_whitespace_is_preserved() {
+    setup_case release-channel-internal-whitespace
+    prepare_deferred_path_fixture
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    # Internal whitespace ("sta ble") must NOT be normalised to "stable"
+    # by an over-eager trim. The bridge trims leading/trailing whitespace
+    # only; the typo surfaces at feed/update.sh's allowlist check.
+    printf 'sta ble' > "$ROOT_DIR/etc/airplanes/release-channel"
+
+    local stderr_log="$CASE_DIR/stderr.log"
+    run_update "file://$FEED_BARE" success "" 0 0 \
+        "$CASE_DIR/installed-update/update-airplanes.sh" 2> "$stderr_log" \
+        || { cat "$stderr_log" >&2; fail "release-channel-internal-whitespace path failed"; }
+
+    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "sta ble" ]] \
+        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want 'sta ble' (must not strip internal whitespace)"
+    grep -q "release-channel contains 'sta ble'" "$stderr_log" \
+        || { cat "$stderr_log" >&2; fail "bridge did not warn about internal-whitespace release-channel value"; }
+    # Same "no fallback injection for invalid channels" guarantee as the
+    # invalid-content case.
+    assert_contains "$FEED_UPDATE_LOG" '^branch=$'
+    echo "release-channel internal-whitespace preservation passed"
 }
 
 test_bad_feed_repo_fails_before_tar1090() {
@@ -772,12 +788,14 @@ main() {
     test_release_channel_already_present_is_preserved
     test_release_channel_empty_file_is_self_healed
     test_release_channel_invalid_content_is_preserved
+    test_release_channel_with_internal_whitespace_is_preserved
     test_release_channel_whitespace_only_is_self_healed
     test_operator_feed_branch_override_passes_through
     test_tag_present_uses_deferred_resolution
     test_no_tags_with_release_channel_dev_falls_back_to_dev
     test_no_tags_with_release_channel_stable_falls_back_to_main
     test_operator_stable_sentinel_bootstraps_correctly
+    test_operator_stable_sentinel_with_no_tags_passes_through
     test_bad_feed_repo_fails_before_tar1090
     test_feed_update_failure_propagates
     test_chroot_skips_feed_update
