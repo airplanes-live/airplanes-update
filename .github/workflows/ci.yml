@@ -102,6 +102,9 @@ jobs:
       - name: Run updater rootfs smoke
         run: bash test/update-airplanes-rootfs-smoke.sh
 
+      - name: Run airplanes-first-run import call test
+        run: bash test/test-first-run-import-call.sh
+
   image-release-rootfs-smoke:
     name: image release rootfs smoke
     runs-on: ubuntu-24.04
