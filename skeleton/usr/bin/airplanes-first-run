@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# `systemctl start` on a unit with `After=airplanes-first-run.service`
+# would wait for this script to finish before activating that unit —
+# which can never happen while the start itself is blocking us. The fix
+# is `--no-block` on the enable-arm start: queue the start job and let
+# systemd run it after this Type=oneshot script exits. `enable` is
+# dropped to a pure symlink (no `--now`) for the same reason; the
+# subsequent `start --no-block` performs the activation. Disable does
+# not have a corresponding circular dependency (stopping a unit doesn't
+# need its After= predecessor inactive), so it keeps the synchronous
+# form.
 function services-handle() {
     for SERVICE in $2; do
         echo "$1 $SERVICE"
@@ -13,10 +23,10 @@ function services-handle() {
         fi
         if [[ $1 == enable ]]; then
             if ! systemctl is-enabled $SERVICE &>/dev/null; then
-                systemctl enable --now $SERVICE
+                systemctl enable $SERVICE
             fi
             if ! systemctl is-active $SERVICE &>/dev/null; then
-                systemctl start $SERVICE
+                systemctl start --no-block $SERVICE
             fi
         fi
     done
