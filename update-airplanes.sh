@@ -107,20 +107,32 @@ if [[ -r "$migrator" && -f "$config_file" ]]; then
 fi
 unset migrator config_file
 
-# Seed /etc/airplanes/release-channel=stable on legacy-bridge boxes that
-# don't yet have one. feed/update.sh reads this file and treats `stable`
-# as a sentinel that resolves to the latest semver tag at runtime (via
-# git ls-remote --tags). Without this, legacy-image feeders keep tracking
-# main HEAD because the bridge used to pass AIRPLANES_FEED_BRANCH=main
-# explicitly, which bypasses release-channel resolution entirely.
-# Write-if-absent so an operator who has manually pinned release-channel
-# (e.g. =dev for a test feeder) is not clobbered.
-release_channel_file="$(airplanes_path /etc/airplanes/release-channel)"
-if [[ ! -f "$release_channel_file" ]]; then
-    mkdir -p "$(dirname "$release_channel_file")"
-    echo "stable" > "$release_channel_file"
+# Persist /etc/airplanes/release-channel=stable on legacy-bridge boxes
+# that don't yet have one. feed/update.sh treats the file's `stable`
+# value as a sentinel that resolves to the latest semver tag at runtime
+# via git ls-remote --tags. feed's update.sh also defaults to the stable
+# channel when both AIRPLANES_FEED_BRANCH and the file are absent, so
+# this isn't strictly required for first-run resolution — it's the
+# persistent channel signal that survives across runs and is visible to
+# anyone inspecting the box. Operator-pinned values (e.g. `dev` on a
+# test feeder) are preserved; an empty file from a previous interrupted
+# write is self-healed.
+#
+# Skip in chroot: image-build flows have their own release-channel
+# logic (image stage 06 writes it from the config-{dev,stable} channel),
+# and a chroot run of this bridge shouldn't second-guess that.
+if ! ischroot; then
+    release_channel_file="$(airplanes_path /etc/airplanes/release-channel)"
+    if [[ ! -s "$release_channel_file" ]]; then
+        mkdir -p "$(dirname "$release_channel_file")"
+        release_channel_tmp="$(mktemp "${release_channel_file}.XXXXXX")"
+        chmod 0644 "$release_channel_tmp"
+        printf 'stable\n' > "$release_channel_tmp"
+        mv -f "$release_channel_tmp" "$release_channel_file"
+        unset release_channel_tmp
+    fi
+    unset release_channel_file
 fi
-unset release_channel_file
 
 # remove strange dhcpcd wait.conf in case it's there
 rm -f "$(airplanes_path /etc/systemd/system/dhcpcd.service.d/wait.conf)"
@@ -212,6 +224,21 @@ else
     )
     if [[ -n "${AIRPLANES_FEED_BRANCH:-}" ]]; then
         feed_env_args+=("AIRPLANES_FEED_BRANCH=$AIRPLANES_FEED_BRANCH")
+    else
+        # No-tags-yet fallback. feed/update.sh on the stable channel
+        # aborts with "no v[MAJOR].[MINOR].[PATCH] tags exist" when the
+        # remote has no semver tags. Until v0.1.0 is cut, that's the
+        # state of airplanes-live/feed — so on a real bridge run today
+        # the deferred-resolution path would refuse to update.
+        # Preflight: if the operator hasn't pinned AIRPLANES_FEED_BRANCH
+        # and the feed remote has no semver tags yet, fall back to
+        # passing the bridge's own FEED_BRANCH (main / dev) so the box
+        # keeps updating. This branch becomes a no-op once tags exist.
+        if ! git ls-remote --tags --refs "$FEED_REPO" 2>/dev/null \
+            | grep -Eq 'refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "no semver tags on $FEED_REPO yet; pinning AIRPLANES_FEED_BRANCH=$FEED_BRANCH as a transitional measure" >&2
+            feed_env_args+=("AIRPLANES_FEED_BRANCH=$FEED_BRANCH")
+        fi
     fi
     # Other exported AIRPLANES_* overrides (MLAT/readsb repos etc.) are
     # inherited by bash through the env.
