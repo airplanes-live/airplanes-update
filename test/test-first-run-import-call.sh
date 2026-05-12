@@ -50,16 +50,16 @@ chmod +x "$STUB/apl-feed"
 # arms; everything else returns 0.
 cat > "$STUB/systemctl" <<SYSTEMCTL
 #!/usr/bin/env bash
-printf '%s' "\$1" >> "$SYSTEMCTL_LOG"
+sub="\$1"
 shift
-for arg in "\$@"; do
-    printf '\t%s' "\$arg" >> "$SYSTEMCTL_LOG"
-done
-printf '\n' >> "$SYSTEMCTL_LOG"
-sub="\$(awk -F'\t' '{print \$1; exit}' "$SYSTEMCTL_LOG" | tail -n 1)"
-# The first column of the last logged line is the subcommand.
-last="\$(tail -n 1 "$SYSTEMCTL_LOG" | cut -f1)"
-case "\$last" in
+{
+    printf '%s' "\$sub"
+    for arg in "\$@"; do
+        printf '\t%s' "\$arg"
+    done
+    printf '\n'
+} >> "$SYSTEMCTL_LOG"
+case "\$sub" in
     is-enabled|is-active) exit 1 ;;
     *) exit 0 ;;
 esac
@@ -74,6 +74,9 @@ chmod +x "$ROOT/usr/local/bin/create-uuid.sh"
 cp "$ROOT/usr/local/bin/create-uuid.sh" "$ROOT/usr/local/bin/fix-config.sh"
 
 # Seed a legacy-shaped boot config — the post-bridge migrate-config.sh form.
+# DUMP978=yes exercises the enable arm for dump978-fa / airplanes-978 /
+# tar1090-978, three of the units that declare After=airplanes-first-run.
+# service and would deadlock without --no-block.
 cat > "$ROOT/boot/airplanes-config.txt" <<'BOOT_CONFIG'
 LATITUDE=52.5
 LONGITUDE=13.4
@@ -83,7 +86,7 @@ MLAT_USER="alice"
 MLAT_ENABLED=true
 MLAT_MARKER=yes
 MLAT_PRIVATE=false
-DUMP978=no
+DUMP978=yes
 DUMP1090=yes
 GRAPHS1090=yes
 BOOT_CONFIG
@@ -131,14 +134,28 @@ if [[ -n "$bare_starts" ]]; then
     printf '  %s\n' "$bare_starts" >&2
     exit 1
 fi
-# Sanity: at least one start fired in the enable arm. fixture has DUMP1090=yes
-# and GRAPHS1090=yes so airplanes-mlat / graphs1090 / autogain1090.timer
-# should all have been issued.
-start_count="$(awk -F'\t' '$1 == "start" { n++ } END { print n+0 }' "$SYSTEMCTL_LOG")"
-if (( start_count == 0 )); then
-    echo "FAIL: no systemctl start calls observed (stub or fixture broken)" >&2
-    cat "$SYSTEMCTL_LOG" >&2
+
+# No `enable --now` regression — services-handle's enable arm must split
+# enable (symlink only) from start --no-block. A reintroduced enable --now
+# brings the deadlock back even with --no-block on the subsequent start.
+enable_now="$(awk -F'\t' '$1 == "enable" { for (i=2; i<=NF; i++) if ($i == "--now") { print; next } }' "$SYSTEMCTL_LOG")"
+if [[ -n "$enable_now" ]]; then
+    echo "FAIL: systemctl enable --now reappeared (deadlock regression):" >&2
+    printf '  %s\n' "$enable_now" >&2
     exit 1
 fi
+
+# Specific coverage: every After=airplanes-first-run.service unit listed
+# in the legacy fixture should be started via --no-block. dump978-fa /
+# airplanes-978 from DUMP978=yes, airplanes-mlat from USER=alice +
+# DUMP1090=yes, plus the autogain1090.timer / graphs1090 / collectd
+# that don't declare After= but ride the same arm.
+for unit in dump978-fa airplanes-978 airplanes-mlat; do
+    if ! awk -F'\t' -v u="$unit" '$1 == "start" && $NF == u { found=1 } END { exit !found }' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: no systemctl start --no-block $unit observed" >&2
+        cat "$SYSTEMCTL_LOG" >&2
+        exit 1
+    fi
+done
 
 echo "first-run import call test passed"

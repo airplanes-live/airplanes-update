@@ -17,7 +17,9 @@ if grep -qs -e 'receiver.*dvb' -e 'bs.*yes' -e 'raw.*yes' /etc/fr24feed.ini; the
     apt purge -y dump1090-mutability &>/dev/null
     pkill -9 fr24feed || true
     systemctl restart fr24feed &>/dev/null || true
-    systemctl restart readsb &>/dev/null || true
+    # readsb has After=airplanes-first-run.service; --no-block avoids
+    # the same circular wait that services-handle() above does.
+    systemctl restart --no-block readsb &>/dev/null || true
 fi
 
 if grep -qs -e 'fr24feed' /etc/apt/sources.list; then
@@ -39,7 +41,9 @@ EOF
     apt purge -y dump1090 &>/dev/null
     apt purge -y dump1090-mutability &>/dev/null
     systemctl restart rbfeeder &>/dev/null || true
-    systemctl restart readsb &>/dev/null || true
+    # readsb has After=airplanes-first-run.service; --no-block avoids
+    # the same circular wait that services-handle() above does.
+    systemctl restart --no-block readsb &>/dev/null || true
 fi
 
 rm -f /etc/cron.d/fr24feed_updater
