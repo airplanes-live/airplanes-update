@@ -107,6 +107,21 @@ if [[ -r "$migrator" && -f "$config_file" ]]; then
 fi
 unset migrator config_file
 
+# Seed /etc/airplanes/release-channel=stable on legacy-bridge boxes that
+# don't yet have one. feed/update.sh reads this file and treats `stable`
+# as a sentinel that resolves to the latest semver tag at runtime (via
+# git ls-remote --tags). Without this, legacy-image feeders keep tracking
+# main HEAD because the bridge used to pass AIRPLANES_FEED_BRANCH=main
+# explicitly, which bypasses release-channel resolution entirely.
+# Write-if-absent so an operator who has manually pinned release-channel
+# (e.g. =dev for a test feeder) is not clobbered.
+release_channel_file="$(airplanes_path /etc/airplanes/release-channel)"
+if [[ ! -f "$release_channel_file" ]]; then
+    mkdir -p "$(dirname "$release_channel_file")"
+    echo "stable" > "$release_channel_file"
+fi
+unset release_channel_file
+
 # remove strange dhcpcd wait.conf in case it's there
 rm -f "$(airplanes_path /etc/systemd/system/dhcpcd.service.d/wait.conf)"
 
@@ -183,12 +198,25 @@ if ischroot; then
 else
     echo 'updating airplanes.live feed components .......'
     git clone --quiet --depth 1 --single-branch --branch "$FEED_BRANCH" "$FEED_REPO" feed
-    # Other exported AIRPLANES_* overrides, such as MLAT/readsb repos, are inherited by bash.
-    AIRPLANES_ROOT="$AIRPLANES_ROOT" \
-    AIRPLANES_FEED_REPO="$FEED_REPO" \
-    AIRPLANES_FEED_BRANCH="$FEED_BRANCH" \
-    AIRPLANES_PACKAGE_MANAGER="${AIRPLANES_PACKAGE_MANAGER:-apt}" \
-        bash "$updir/feed/update.sh"
+    # The bridge's own clone of feed/ has to pin a ref to bootstrap
+    # update.sh (above). Inside that update.sh, if the operator has not
+    # explicitly set AIRPLANES_FEED_BRANCH, defer to feed's release-
+    # channel resolution — it self-replaces + re-execs from the resolved
+    # tag, so the end state is the tagged release even though we cloned
+    # main. An explicit operator AIRPLANES_FEED_BRANCH still wins (used
+    # for testing / recovery / pinning).
+    feed_env_args=(
+        "AIRPLANES_ROOT=$AIRPLANES_ROOT"
+        "AIRPLANES_FEED_REPO=$FEED_REPO"
+        "AIRPLANES_PACKAGE_MANAGER=${AIRPLANES_PACKAGE_MANAGER:-apt}"
+    )
+    if [[ -n "${AIRPLANES_FEED_BRANCH:-}" ]]; then
+        feed_env_args+=("AIRPLANES_FEED_BRANCH=$AIRPLANES_FEED_BRANCH")
+    fi
+    # Other exported AIRPLANES_* overrides (MLAT/readsb repos etc.) are
+    # inherited by bash through the env.
+    env "${feed_env_args[@]}" bash "$updir/feed/update.sh"
+    unset feed_env_args
 
     rm -f -R "$updir/feed"
 fi

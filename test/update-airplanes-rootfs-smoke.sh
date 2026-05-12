@@ -303,6 +303,11 @@ EOF
 
 assert_success_state() {
     local expected_package_manager="$1"
+    # The branch the bridge passes through to feed/update.sh. Empty means
+    # the bridge did NOT pass AIRPLANES_FEED_BRANCH — the expected default
+    # when the operator hasn't pinned a branch via env, so feed's update.sh
+    # falls back to /etc/airplanes/release-channel resolution.
+    local expected_feed_branch_in_log="${2-$FEED_BRANCH}"
 
     [[ -f "$ROOT_DIR/etc/systemd/system/airplanes-first-run.service" ]] || fail "missing first-run service"
     # The first-run script must translate /boot/airplanes-config.txt into
@@ -335,9 +340,18 @@ assert_success_state() {
 
     assert_contains "$FEED_UPDATE_LOG" "root=$ROOT_DIR"
     assert_contains "$FEED_UPDATE_LOG" "repo=file://$FEED_BARE"
-    assert_contains "$FEED_UPDATE_LOG" "branch=$FEED_BRANCH"
+    assert_contains "$FEED_UPDATE_LOG" "^branch=$expected_feed_branch_in_log$"
     assert_contains "$FEED_UPDATE_LOG" "^package_manager=$expected_package_manager$"
     assert_contains "$FEED_UPDATE_LOG" '^mode=success$'
+
+    # release-channel seeded to "stable" when the bridge ran on a box
+    # that didn't already have one — that's what enables feed/update.sh
+    # to resolve to the latest semver tag instead of being pinned to the
+    # bridge's branch.
+    [[ -f "$ROOT_DIR/etc/airplanes/release-channel" ]] \
+        || fail "missing /etc/airplanes/release-channel"
+    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "stable" ]] \
+        || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want stable"
     assert_contains "$TAR1090_LOG" '^tar1090 install$'
     assert_contains "$COMMAND_LOG" '^apt-get install '
     assert_contains "$COMMAND_LOG" '^systemctl daemon-reload$'
@@ -375,7 +389,11 @@ test_dev_checkout_defaults_to_dev_branches() {
 
     run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/installed-update/update-airplanes.sh" \
         || fail "dev checkout default path failed"
-    assert_success_state apt
+    # Operator did not pin AIRPLANES_FEED_BRANCH; the bridge uses dev for
+    # its own initial clone of feed/ but doesn't pass that through to
+    # update.sh — feed resolves via release-channel instead. Empty branch
+    # in the feed-update log is the expected signal.
+    assert_success_state apt ""
     echo "dev checkout branch defaults path passed"
 }
 
@@ -388,8 +406,38 @@ test_raw_script_defaults_to_main_branches() {
 
     run_update "file://$FEED_BARE" success "" 0 0 "$CASE_DIR/raw-update/update-airplanes.sh" \
         || fail "raw script default path failed"
-    assert_success_state apt
+    # Same as the dev-checkout case: no operator AIRPLANES_FEED_BRANCH,
+    # so the bridge does not pass it through. feed resolves via the
+    # newly-seeded release-channel=stable.
+    assert_success_state apt ""
     echo "raw script branch defaults path passed"
+}
+
+test_release_channel_already_present_is_preserved() {
+    setup_case release-channel-preserved
+    prepare_common_fixture
+    mkdir -p "$ROOT_DIR/etc/airplanes"
+    echo "dev" > "$ROOT_DIR/etc/airplanes/release-channel"
+
+    run_update || fail "release-channel-preserved path failed"
+
+    # Operator pinned dev before running the bridge; the bridge must
+    # NOT clobber that with stable.
+    [[ "$(cat "$ROOT_DIR/etc/airplanes/release-channel")" == "dev" ]] \
+        || fail "release-channel was clobbered: $(cat "$ROOT_DIR/etc/airplanes/release-channel")"
+    echo "release-channel preserved path passed"
+}
+
+test_operator_feed_branch_override_passes_through() {
+    setup_case operator-feed-branch-override
+    prepare_common_fixture
+
+    # Operator sets AIRPLANES_FEED_BRANCH explicitly (testing/recovery).
+    # The bridge must pass that through to feed/update.sh, overriding
+    # the release-channel resolution that would otherwise apply.
+    run_update || fail "operator override path failed"
+    assert_success_state apt "$FEED_BRANCH"
+    echo "operator feed-branch override path passed"
 }
 
 test_bad_feed_repo_fails_before_tar1090() {
@@ -443,6 +491,8 @@ main() {
     test_package_manager_override
     test_dev_checkout_defaults_to_dev_branches
     test_raw_script_defaults_to_main_branches
+    test_release_channel_already_present_is_preserved
+    test_operator_feed_branch_override_passes_through
     test_bad_feed_repo_fails_before_tar1090
     test_feed_update_failure_propagates
     test_chroot_skips_feed_update
