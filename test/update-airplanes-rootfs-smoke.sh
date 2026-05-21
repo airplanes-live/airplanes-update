@@ -359,6 +359,19 @@ assert_success_state() {
         || fail "release-channel = $(cat "$ROOT_DIR/etc/airplanes/release-channel"), want $expected_release_channel"
     assert_contains "$TAR1090_LOG" '^tar1090 install$'
     assert_contains "$COMMAND_LOG" '^apt-get install '
+    # Pre-flight before daemon-reload: stop collectd to free runtime tmpfs
+    # space so systemd's 16M safety buffer does not abort daemon-reload on
+    # bookworm Pi-OS feeders. Pins the behavior so the pre-flight cannot
+    # silently regress. The stub returns 0 for is-active so stop is always
+    # invoked under the test. Order matters — stop must precede reload.
+    assert_contains "$COMMAND_LOG" '^systemctl is-active --quiet collectd$'
+    assert_contains "$COMMAND_LOG" '^systemctl stop collectd$'
+    local stop_line reload_line
+    stop_line="$(grep -n '^systemctl stop collectd$' "$COMMAND_LOG" | head -1 | cut -d: -f1)"
+    reload_line="$(grep -n '^systemctl daemon-reload$' "$COMMAND_LOG" | head -1 | cut -d: -f1)"
+    if [[ -z "$stop_line" || -z "$reload_line" || "$stop_line" -ge "$reload_line" ]]; then
+        fail "expected 'systemctl stop collectd' before 'systemctl daemon-reload' (stop=${stop_line:-missing}, reload=${reload_line:-missing})"
+    fi
     assert_contains "$COMMAND_LOG" '^systemctl daemon-reload$'
     assert_contains "$COMMAND_LOG" '^systemctl enable airplanes-first-run.service readsb.service airplanes-mlat.service airplanes-feed.service pingfail.service$'
     assert_contains "$COMMAND_LOG" '^systemctl mask autogain1090.timer$'
