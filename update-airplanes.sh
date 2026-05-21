@@ -196,6 +196,20 @@ fi
 rm -f "$(airplanes_path /etc/systemd/system/dhcpcd.service.d/wait.conf)"
 
 
+# Pre-flight: systemd refuses `daemon-reload` when the runtime tmpfs has
+# less than ~16M free (a safety buffer added in v249). On bookworm Pi-OS
+# feeders the runtime tmpfs defaults to ~43M and graphs1090's collectd
+# can occupy ~34M of it via its in-memory RRD cache, which drops us
+# below the safety buffer. With `set -e`, the daemon-reload failure
+# would abort the entire upgrade (no feed bridge, no service enables).
+# Stop collectd to free its runtime cache; this script reboots at its
+# tail so collectd auto-starts on next boot — no explicit restart
+# needed. No-op when collectd is absent (manual / non-graphs1090
+# installs).
+if systemctl is-active --quiet collectd 2>/dev/null; then
+    systemctl stop collectd || true
+fi
+
 systemctl daemon-reload
 
 # enable services
